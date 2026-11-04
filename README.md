@@ -130,3 +130,10 @@ normalmente não é aceitável para o CM de um cliente; prefira stdio local.
 - Tools de escrita (restart de role, refresh de config) atrás de uma flag
   `CM_ALLOW_WRITE=true` e confirmação explícita.
 - Integrações com YARN RM / Spark History / Impala Daemon web UIs para diagnóstico de jobs.
+
+## Licença
+
+Distribuído sob a [Apache License 2.0](LICENSE). Veja também o arquivo [NOTICE](NOTICE).
+
+Cloudera e Cloudera Manager são marcas da Cloudera, Inc. Este projeto não é afiliado
+nem endossado pela Cloudera.
