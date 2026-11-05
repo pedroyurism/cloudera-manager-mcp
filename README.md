@@ -4,7 +4,7 @@ Servidor MCP em Python (FastMCP + httpx) que expõe a API REST do Cloudera Manag
 para o Claude (Desktop, Claude Code ou qualquer cliente MCP). **Só faz GET**: não há
 nenhuma tool de start/stop/restart/alteração de configuração.
 
-## Tools (26)
+## Tools (29)
 
 ### Cloudera Manager (18)
 
@@ -43,6 +43,35 @@ nenhuma tool de start/stop/restart/alteração de configuração.
 As tools marcadas **CM** usam só as credenciais do Cloudera Manager. As marcadas **RM**
 falam direto com o ResourceManager (veja [Acesso ao ResourceManager](#acesso-ao-resourcemanager)).
 
+### Análise de queries Impala (3)
+
+| Tool | O que faz |
+|---|---|
+| `impala_query_ranking` | **Ranking de queries problemáticas** com o motivo de cada uma. `rank_by`: `score` (pior primeiro, soma dos problemas), `duration`, `memory` (OOM no topo), `spill` ou `planning` |
+| `impala_query_issues_summary` | Visão geral da janela: quantas queries longas, com memória excessiva/OOM, spill e falhas de planejamento; usuários e pools que concentram os problemas; **queries recorrentes** (mesmo SQL com literais diferentes) que mais somam tempo; motivos de falha mais comuns |
+| `impala_query_details` | Diagnóstico de uma query pelo profile: status/erro, tabelas e colunas **sem estatísticas**, ExecSummary (memória real x estimada por operador), **spill por operador**, timeline e recomendações |
+
+Usam só as credenciais do CM (dados do Service Monitor). Cada query recebe uma lista de
+problemas com `code`, `severity` (`alta`, `media`, `baixa`) e explicação:
+
+| Categoria | `code` | Quando |
+|---|---|---|
+| Alta duração | `slow` | duração ≥ `slow_seconds` (padrão 60 s); mostra o gargalo (cliente buscando resultados, fila de admissão, storage, rede, CPU) quando uma parcela passa de 20% |
+| Memória | `oom` | falhou por falta de memória |
+| | `high_memory` | pico por nó ≥ `memory_gb_per_node` (padrão 4 GB) |
+| | `memory_underestimated` | usou mais de 3x a memória estimada pelo planner |
+| Spill-to-disk | `spill` | `memory_spilled` > 0 (alta a partir de 1 GB) |
+| Planejamento | `planning_failure` | falhou antes de executar (AnalysisException, sintaxe, permissão, tabela inexistente) |
+| | `admission_rejected` | rejeitada pelo admission control do pool |
+| | `stats_missing` | tabelas/colunas sem estatísticas (ou corrompidas) |
+| | `slow_planning` | planejamento ≥ `planning_seconds` (padrão 10 s) |
+| | `memory_overestimated` | planner estimou mais de 10x o que usou (prende memória na admissão) |
+| Outras falhas | `execution_failure` | falha durante a execução (ex.: impalad inacessível) |
+
+Os limites são parâmetros das tools. O CM só guarda as queries que o Service Monitor
+reteve (veja "Impala Query Monitoring" no CM) e pode avisar que atingiu o limite de
+varredura: esses avisos aparecem em `cmWarnings`.
+
 As respostas são resumidas (campos relevantes) e truncadas em `CM_MCP_MAX_CHARS`
 para não estourar o contexto do modelo.
 
@@ -54,7 +83,7 @@ para não estourar o contexto do modelo.
 
 ### Permissões do usuário no CM
 
-Com o papel `Read-Only`, 24 das 26 tools funcionam. Duas exigem mais permissão e, sem ela,
+Com o papel `Read-Only`, 27 das 29 tools funcionam. Duas exigem mais permissão e, sem ela,
 respondem `CM API 403` (comportamento observado no CM 7.13.2):
 
 | Tool | O que é preciso |
@@ -103,7 +132,7 @@ Edite o `claude_desktop_config.json`
 ```
 
 No Windows o comando fica `C:\\caminho\\cm-mcp-server\\.venv\\Scripts\\cm-mcp-stdio.exe`.
-Reinicie o Claude Desktop e as 26 tools aparecem no menu de ferramentas.
+Reinicie o Claude Desktop e as 29 tools aparecem no menu de ferramentas.
 
 ## Claude Code
 
@@ -150,7 +179,7 @@ ssh -N -L 8088:master1:8088 usuario@bastion
 # e no MCP: YARN_RM_URL=http://127.0.0.1:8088  YARN_RM_TLS=false
 ```
 
-Se o RM não estiver acessível, as outras 23 tools continuam funcionando normalmente.
+Se o RM não estiver acessível, as outras 26 tools continuam funcionando normalmente.
 
 ## Variáveis de ambiente
 
@@ -189,6 +218,15 @@ Se o RM não estiver acessível, as outras 23 tools continuam funcionando normal
 - "Relatório de utilização por usuário da última semana, só em horário comercial de dias úteis."
 - "Por que o job application_1700000000000_0400 falhou?"
 
+**Impala**
+
+- "Quais as 10 piores queries Impala das últimas 24 horas e por quê?"
+- "Quais queries fizeram spill-to-disk ontem e em quais operadores?"
+- "Quem está rodando as queries que mais consomem memória por nó?"
+- "Quais queries falharam no planejamento ou foram rejeitadas na admissão esta semana?"
+- "Quais queries recorrentes mais somam tempo no pool root.bi?"
+- "Diagnostica a query 35464cc79fe6637c:79f0bf4600000000 e diz quais tabelas precisam de COMPUTE STATS."
+
 ## Segurança
 
 - O código só executa `GET`. Mesmo assim, use um usuário Read-Only: é a garantia real.
@@ -204,7 +242,7 @@ Se o RM não estiver acessível, as outras 23 tools continuam funcionando normal
 
 - Tools de escrita (restart de role, refresh de config) atrás de uma flag
   `CM_ALLOW_WRITE=true` e confirmação explícita.
-- Spark History Server e Impala (queries mais pesadas por usuário) para diagnóstico de jobs.
+- Spark History Server para diagnóstico de jobs Spark.
 
 ## Desenvolvimento
 

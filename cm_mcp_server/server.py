@@ -392,8 +392,8 @@ def cm_api_get(path: str, params_json: str = "{}") -> str:
     return _out(cm().get(path, params))
 
 
-# Registra as tools de YARN (módulo separado)
-from cm_mcp_server import yarn  # noqa: E402,F401
+# Registra as tools de YARN e de Impala (módulos separados)
+from cm_mcp_server import impala, yarn  # noqa: E402,F401
 
 
 # ---------------------------------------------------------------------------

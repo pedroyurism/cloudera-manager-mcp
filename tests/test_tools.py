@@ -49,7 +49,7 @@ def test_tool_registry():
         async with Client(mcp) as c:
             return {t.name for t in await c.list_tools()}
     names = asyncio.run(run())
-    assert len(names) == 26
+    assert len(names) == 29
     assert {"yarn_list_applications", "yarn_top_consumers", "yarn_queue_usage",
             "yarn_scheduler_queues", "yarn_cluster_metrics", "yarn_utilization_report",
             "yarn_get_application", "yarn_application_attributes"} <= names
