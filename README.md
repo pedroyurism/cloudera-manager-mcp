@@ -4,7 +4,9 @@ Servidor MCP em Python (FastMCP + httpx) que expõe a API REST do Cloudera Manag
 para o Claude (Desktop, Claude Code ou qualquer cliente MCP). **Só faz GET**: não há
 nenhuma tool de start/stop/restart/alteração de configuração.
 
-## Tools (18)
+## Tools (26)
+
+### Cloudera Manager (18)
 
 | Tool | O que faz |
 |---|---|
@@ -25,6 +27,22 @@ nenhuma tool de start/stop/restart/alteração de configuração.
 | `list_audits` | Auditoria do CM (quem fez o quê) |
 | `cm_api_get` | Escape hatch: GET em qualquer endpoint da API |
 
+### Monitoramento YARN (8)
+
+| Tool | Fonte | O que faz |
+|---|---|---|
+| `yarn_list_applications` | CM | Jobs rodando, terminados ou todos; filtra por usuário, fila e janela; ordena por memória atual, GB-hora, vcore-hora ou duração |
+| `yarn_top_consumers` | CM | **Ranking de quem mais consome** (por usuário ou por fila): GB-hora, vcore-hora, % do total, uso agora, falhas, job mais pesado |
+| `yarn_queue_usage` | CM | Uso atual e pico de cada fila: memória/vcores alocados e pendentes, apps rodando/pendentes, fair share (Fair Scheduler) |
+| `yarn_utilization_report` | CM | Relatório de utilização por fila ou usuário (médias, capacidade ociosa, espera em contenção), com recorte de horário e dias úteis |
+| `yarn_application_attributes` | CM | Atributos aceitos em `extra_filter` (ex.: `application_duration > 30m`) |
+| `yarn_scheduler_queues` | RM | Árvore de filas: capacidade configurada x usada e **consumo de cada usuário dentro da fila** |
+| `yarn_cluster_metrics` | RM | Memória/vcores totais e alocados (%), apps e containers pendentes, NodeManagers com problema |
+| `yarn_get_application` | RM | Detalhe de um job, incluindo `diagnostics` (o motivo da falha) |
+
+As tools marcadas **CM** usam só as credenciais do Cloudera Manager. As marcadas **RM**
+falam direto com o ResourceManager (veja [Acesso ao ResourceManager](#acesso-ao-resourcemanager)).
+
 As respostas são resumidas (campos relevantes) e truncadas em `CM_MCP_MAX_CHARS`
 para não estourar o contexto do modelo.
 
@@ -34,11 +52,23 @@ para não estourar o contexto do modelo.
 - Acesso de rede da máquina que roda o MCP até o CM (porta 7183/7180)
 - **Usuário dedicado no CM com role `Read-Only`** (Administration → Users & Roles)
 
+### Permissões do usuário no CM
+
+Com o papel `Read-Only`, 24 das 26 tools funcionam. Duas exigem mais permissão e, sem ela,
+respondem `CM API 403` (comportamento observado no CM 7.13.2):
+
+| Tool | O que é preciso |
+|---|---|
+| `list_audits` | Papel `Auditor` (ou outro que permita ler a auditoria) |
+| `list_parcels` | Papel acima de `Read-Only` com acesso a parcels |
+
+Se essas duas não forem necessárias, mantenha só o `Read-Only`.
+
 ## Instalação
 
 ```bash
-git clone <seu-repo>/cm-mcp-server.git   # ou descompacte o zip
-cd cm-mcp-server
+git clone https://github.com/pedroyurism/cloudera-manager-mcp.git
+cd cloudera-manager-mcp
 python3 -m venv .venv && source .venv/bin/activate
 pip install -e .
 cp .env.example .env    # edite com seus valores
@@ -73,7 +103,7 @@ Edite o `claude_desktop_config.json`
 ```
 
 No Windows o comando fica `C:\\caminho\\cm-mcp-server\\.venv\\Scripts\\cm-mcp-stdio.exe`.
-Reinicie o Claude Desktop e as 18 tools aparecem no menu de ferramentas.
+Reinicie o Claude Desktop e as 26 tools aparecem no menu de ferramentas.
 
 ## Claude Code
 
@@ -95,6 +125,33 @@ atrás de um reverse proxy com TLS e autenticação antes de expor na rede. Para
 connector remoto no claude.ai, o endpoint precisa estar acessível pela internet, o que
 normalmente não é aceitável para o CM de um cliente; prefira stdio local.
 
+## Acesso ao ResourceManager
+
+As tools `yarn_scheduler_queues`, `yarn_cluster_metrics` e `yarn_get_application` usam a API
+REST do RM (`/ws/v1`). Por padrão o servidor **descobre o RM ativo pelo CM** (role
+`RESOURCEMANAGER` com `haStatus=ACTIVE` e a porta web configurada), então em clusters sem
+Kerberos na interface web não é preciso configurar nada.
+
+| Cenário | Configuração |
+|---|---|
+| Web UI do RM sem autenticação | nada (padrão `YARN_RM_AUTH=none`) |
+| Kerberos/SPNEGO na web UI | `pip install -e '.[kerberos]'`, `kinit` com um principal válido e `YARN_RM_AUTH=kerberos` |
+| Acesso via Knox | `YARN_RM_URL=https://knox:8443/gateway/cdp-proxy-api/resourcemanager`, `YARN_RM_AUTH=basic`, `YARN_RM_USERNAME`/`YARN_RM_PASSWORD` |
+| MCP rodando fora da rede do cluster | `YARN_RM_URL` com um endereço alcançável (veja abaixo) |
+
+**Fora da rede do cluster.** A descoberta pelo CM devolve o hostname interno do RM
+(ex.: `http://master1:8088`), que normalmente não resolve na máquina do MCP. Nesse caso as
+tools de RM respondem *"Não foi possível conectar ao ResourceManager em ..."*. Defina
+`YARN_RM_URL` com um endereço que a máquina alcance. O mais seguro é um túnel SSH por um
+bastion, sem expor a porta do RM:
+
+```bash
+ssh -N -L 8088:master1:8088 usuario@bastion
+# e no MCP: YARN_RM_URL=http://127.0.0.1:8088  YARN_RM_TLS=false
+```
+
+Se o RM não estiver acessível, as outras 23 tools continuam funcionando normalmente.
+
 ## Variáveis de ambiente
 
 | Variável | Padrão | Descrição |
@@ -107,6 +164,12 @@ normalmente não é aceitável para o CM de um cliente; prefira stdio local.
 | `CM_API_VERSION` | autodetectar | Ex.: `v51`. Vazio = consulta `/api/version` |
 | `CM_TIMEOUT` | `30` | Timeout em segundos |
 | `CM_MCP_MAX_CHARS` | `60000` | Tamanho máximo de cada resposta |
+| `YARN_RM_URL` | descobrir pelo CM | URL base do RM ou do Knox, ex.: `https://rm01:8090` |
+| `YARN_RM_TLS` | igual a `CM_USE_TLS` | Usado na descoberta: HTTPS (8090) ou HTTP (8088) |
+| `YARN_RM_PORT` | config da role | Força a porta na descoberta |
+| `YARN_RM_AUTH` | `none` | `none`, `basic` (Knox) ou `kerberos` |
+| `YARN_RM_USERNAME` / `YARN_RM_PASSWORD` | — | Só para `YARN_RM_AUTH=basic` |
+| `YARN_RM_VERIFY_SSL` | igual a `CM_VERIFY_SSL` | `true`, `false` ou caminho do CA bundle |
 
 ## Exemplos de perguntas
 
@@ -117,19 +180,38 @@ normalmente não é aceitável para o CM de um cliente; prefira stdio local.
 - "Teve algum evento CRITICAL de HDFS nas últimas 12 horas?"
 - "Quem reiniciou serviços ontem?" (auditoria)
 
+**YARN**
+
+- "Quais 10 usuários mais consumiram memória do YARN nas últimas 24 horas?"
+- "Quais filas estão com containers pendentes agora?"
+- "Mostra os jobs rodando há mais de 2 horas na fila root.etl."
+- "Como está a ocupação de cada fila em relação à capacidade configurada, e quem está usando cada uma?"
+- "Relatório de utilização por usuário da última semana, só em horário comercial de dias úteis."
+- "Por que o job application_1700000000000_0400 falhou?"
+
 ## Segurança
 
 - O código só executa `GET`. Mesmo assim, use um usuário Read-Only: é a garantia real.
 - Logs e configs podem conter dados sensíveis do cliente e vão para o contexto do
   modelo. Avalie com o cliente antes de usar em produção.
 - Configurações marcadas como `sensitive` no CM já vêm mascaradas pela própria API.
+- Não exponha a porta web do RM (8088/8090) na internet para usar as tools de RM: sem
+  autenticação, a API REST do RM permite submeter aplicações e é alvo comum de ataques
+  (ex.: mineração de criptomoeda). Prefira túnel SSH, VPN ou Knox.
 - Não versione o `.env`.
 
 ## Próximos passos possíveis
 
 - Tools de escrita (restart de role, refresh de config) atrás de uma flag
   `CM_ALLOW_WRITE=true` e confirmação explícita.
-- Integrações com YARN RM / Spark History / Impala Daemon web UIs para diagnóstico de jobs.
+- Spark History Server e Impala (queries mais pesadas por usuário) para diagnóstico de jobs.
+
+## Desenvolvimento
+
+```bash
+pip install -e '.[dev]'
+pytest -q        # roda as tools contra um CM e um RM simulados (tests/mock_servers.py)
+```
 
 ## Licença
 

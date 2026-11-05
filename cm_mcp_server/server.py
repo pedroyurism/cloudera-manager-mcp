@@ -8,116 +8,10 @@ Configuração por variáveis de ambiente (veja .env.example).
 from __future__ import annotations
 
 import json
-import os
-import time
 from datetime import datetime, timedelta, timezone
 from typing import Any
 
-import httpx
-from fastmcp import FastMCP
-
-# ---------------------------------------------------------------------------
-# Configuração
-# ---------------------------------------------------------------------------
-
-CM_HOST = os.environ.get("CM_HOST", "")                  # ex.: cm01.cliente.local
-CM_PORT = os.environ.get("CM_PORT", "")                  # padrão: 7183 (TLS) / 7180
-CM_USE_TLS = os.environ.get("CM_USE_TLS", "true").lower() == "true"
-CM_USERNAME = os.environ.get("CM_USERNAME", "")
-CM_PASSWORD = os.environ.get("CM_PASSWORD", "")
-CM_API_VERSION = os.environ.get("CM_API_VERSION", "")    # vazio = autodetectar
-CM_VERIFY_SSL = os.environ.get("CM_VERIFY_SSL", "true")  # true | false | caminho p/ CA bundle
-CM_TIMEOUT = float(os.environ.get("CM_TIMEOUT", "30"))
-MAX_CHARS = int(os.environ.get("CM_MCP_MAX_CHARS", "60000"))
-
-mcp = FastMCP(
-    "cloudera-manager",
-    instructions=(
-        "Ferramentas somente leitura para o Cloudera Manager. "
-        "Comece por cm_info e list_clusters para descobrir nomes de clusters e serviços; "
-        "os demais tools usam o nome interno (ex.: 'hdfs', 'yarn', 'impala'), não o display name."
-    ),
-)
-
-
-class CMClient:
-    def __init__(self) -> None:
-        if not CM_HOST:
-            raise RuntimeError("CM_HOST não configurado.")
-        if not (CM_USERNAME and CM_PASSWORD):
-            raise RuntimeError("CM_USERNAME/CM_PASSWORD não configurados.")
-
-        scheme = "https" if CM_USE_TLS else "http"
-        port = CM_PORT or ("7183" if CM_USE_TLS else "7180")
-        self.base = f"{scheme}://{CM_HOST}:{port}/api"
-
-        verify: bool | str
-        if CM_VERIFY_SSL.lower() in ("true", "false"):
-            verify = CM_VERIFY_SSL.lower() == "true"
-        else:
-            verify = CM_VERIFY_SSL  # caminho para CA bundle
-
-        self.http = httpx.Client(
-            auth=(CM_USERNAME, CM_PASSWORD),
-            verify=verify,
-            timeout=CM_TIMEOUT,
-            headers={"Accept": "application/json"},
-        )
-        self._version = CM_API_VERSION or None
-
-    @property
-    def version(self) -> str:
-        if not self._version:
-            r = self.http.get(f"{self.base}/version")
-            r.raise_for_status()
-            self._version = r.text.strip()
-        return self._version
-
-    def get(self, path: str, params: dict[str, Any] | None = None, raw: bool = False) -> Any:
-        url = f"{self.base}/{self.version}/{path.lstrip('/')}"
-        params = {k: v for k, v in (params or {}).items() if v is not None}
-        r = self.http.get(url, params=params)
-        if r.status_code >= 400:
-            raise RuntimeError(f"CM API {r.status_code} em GET {path}: {r.text[:500]}")
-        return r.text if raw else r.json()
-
-
-_client: CMClient | None = None
-
-
-def cm() -> CMClient:
-    global _client
-    if _client is None:
-        _client = CMClient()
-    return _client
-
-
-def _out(data: Any) -> str:
-    """Serializa e trunca para não estourar o contexto do modelo."""
-    text = data if isinstance(data, str) else json.dumps(data, ensure_ascii=False, indent=1)
-    if len(text) > MAX_CHARS:
-        return text[:MAX_CHARS] + f"\n... [truncado: {len(text)} caracteres no total]"
-    return text
-
-
-def _items(resp: Any) -> list[dict]:
-    return resp.get("items", []) if isinstance(resp, dict) else resp
-
-
-def _iso(dt: datetime) -> str:
-    return dt.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.000Z")
-
-
-def _health(obj: dict) -> dict:
-    return {
-        "healthSummary": obj.get("healthSummary"),
-        "unhealthyChecks": [
-            {"name": h.get("name"), "summary": h.get("summary"), "explanation": h.get("explanation")}
-            for h in obj.get("healthChecks", []) or []
-            if h.get("summary") not in ("GOOD", "DISABLED", "NOT_AVAILABLE")
-        ],
-    }
-
+from cm_mcp_server.core import _health, _items, _iso, _out, cm, mcp
 
 # ---------------------------------------------------------------------------
 # Tools – visão geral
@@ -498,6 +392,10 @@ def cm_api_get(path: str, params_json: str = "{}") -> str:
     return _out(cm().get(path, params))
 
 
+# Registra as tools de YARN (módulo separado)
+from cm_mcp_server import yarn  # noqa: E402,F401
+
+
 # ---------------------------------------------------------------------------
 # Entrypoints
 # ---------------------------------------------------------------------------
@@ -507,6 +405,8 @@ def main_stdio() -> None:
 
 
 def main_http() -> None:
+    import os
+
     host = os.environ.get("MCP_HTTP_HOST", "127.0.0.1")
     port = int(os.environ.get("MCP_HTTP_PORT", "8000"))
     mcp.run(transport="http", host=host, port=port)
