@@ -70,7 +70,9 @@ class CMClient:
     def get(self, path: str, params: dict[str, Any] | None = None, raw: bool = False) -> Any:
         url = f"{self.base}/{self.version}/{path.lstrip('/')}"
         params = {k: v for k, v in (params or {}).items() if v is not None}
-        r = self.http.get(url, params=params)
+        # Endpoints de log só respondem text/plain; pedir JSON neles dá 406.
+        headers = {"Accept": "*/*"} if raw else None
+        r = self.http.get(url, params=params, headers=headers)
         if r.status_code >= 400:
             raise RuntimeError(f"CM API {r.status_code} em GET {path}: {r.text[:500]}")
         return r.text if raw else r.json()
@@ -168,7 +170,16 @@ class RMClient:
     def get(self, path: str, params: dict[str, Any] | None = None) -> Any:
         url = f"{self.base}/ws/v1/{path.lstrip('/')}"
         params = {k: v for k, v in (params or {}).items() if v is not None}
-        r = self.http.get(url, params=params)
+        try:
+            r = self.http.get(url, params=params)
+        except httpx.TransportError as e:
+            origin = ("endereço vindo de YARN_RM_URL" if YARN_RM_URL else
+                      "endereço descoberto pelo CM; o hostname interno pode não resolver fora da rede do cluster")
+            raise RuntimeError(
+                f"Não foi possível conectar ao ResourceManager em {self.base} ({origin}). "
+                f"Erro: {type(e).__name__}: {e}. Defina YARN_RM_URL com um endereço alcançável "
+                "(ex.: IP do RM, Knox ou túnel SSH)."
+            ) from e
         if r.status_code == 401:
             raise RuntimeError(
                 "ResourceManager retornou 401. Se o cluster usa Kerberos/SPNEGO, configure "

@@ -87,6 +87,8 @@ def test_list_filters_user():
     data = ok("yarn_list_applications", cluster="Cluster1", state="all", user="ana")
     assert data["totalMatched"] == 6
     assert {a["user"] for a in data["applications"]} == {"ana"}
+    for a in data["applications"]:  # terminadas: -1 do CM não deve aparecer
+        assert not {"currentMemoryGB", "currentVcores", "runningContainers"} & a.keys()
 
 
 def test_top_users():
@@ -142,6 +144,17 @@ def test_cluster_metrics():
 def test_get_application_diagnostics():
     data = ok("yarn_get_application", cluster="Cluster1", application_id="application_1700000000000_0400")
     assert data["finalStatus"] == "FAILED" and "OOM" in data["diagnostics"]
+    assert not {"allocatedMB", "allocatedVCores", "runningContainers"} & data.keys()
+
+
+def test_unreachable_rm_explains_yarn_rm_url():
+    import pytest
+
+    from cm_mcp_server.core import RMClient
+
+    with pytest.raises(RuntimeError, match="YARN_RM_URL") as e:
+        RMClient("http://rm-inexistente.invalid:8088").get("cluster/metrics")
+    assert "rm-inexistente.invalid" in str(e.value)
 
 
 def test_utilization_report():

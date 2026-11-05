@@ -42,6 +42,14 @@ def _num(v: Any) -> float:
         return 0.0
 
 
+def _live(v: Any) -> float | None:
+    """Valor de recurso 'atual'. CM e RM usam -1 em apps terminadas para dizer 'não se aplica'."""
+    if v is None:
+        return None
+    n = _num(v)
+    return n if n >= 0 else None
+
+
 def _build_filter(*, executing: bool | None, user: str | None, queue: str | None,
                   extra: str | None) -> str:
     parts = []
@@ -84,6 +92,7 @@ def _app_summary(a: dict, now: datetime) -> dict:
     start, end = _parse_ts(a.get("startTime")), _parse_ts(a.get("endTime"))
     duration = ((end or now) - start).total_seconds() / 60 if start else None
     attrs = a.get("attributes") or {}
+    mem = _live(a.get("allocatedMB"))
     return {k: v for k, v in {
         "applicationId": a.get("applicationId"),
         "name": (a.get("name") or "")[:120],
@@ -95,9 +104,9 @@ def _app_summary(a: dict, now: datetime) -> dict:
         "startTime": a.get("startTime"),
         "endTime": a.get("endTime"),
         "durationMin": round(duration, 1) if duration is not None else None,
-        "currentMemoryGB": round(_num(a.get("allocatedMB")) / 1024, 1) if a.get("allocatedMB") is not None else None,
-        "currentVcores": a.get("allocatedVCores"),
-        "runningContainers": a.get("runningContainers"),
+        "currentMemoryGB": round(mem / 1024, 1) if mem is not None else None,
+        "currentVcores": a.get("allocatedVCores") if _live(a.get("allocatedVCores")) is not None else None,
+        "runningContainers": a.get("runningContainers") if _live(a.get("runningContainers")) is not None else None,
         "memoryGBHours": round(_num(a.get("allocatedMemorySeconds")) * MB_SEC_TO_GB_H, 2),
         "vcoreHours": round(_num(a.get("allocatedVcoreSeconds")) * SEC_TO_H, 2),
         "peakContainerMemoryMB": a.get("containerUsedMemoryMax"),
@@ -198,8 +207,8 @@ def yarn_top_consumers(cluster: str, hours: float = 24, group_by: str = "user",
         g["vcoreHours"] += _num(a.get("allocatedVcoreSeconds")) * SEC_TO_H
         if not a.get("endTime"):
             g["running"] += 1
-            g["currentMemoryGB"] += _num(a.get("allocatedMB")) / 1024
-            g["currentVcores"] += int(_num(a.get("allocatedVCores")))
+            g["currentMemoryGB"] += (_live(a.get("allocatedMB")) or 0) / 1024
+            g["currentVcores"] += int(_live(a.get("allocatedVCores")) or 0)
         if (a.get("state") or "").upper() in ("FAILED", "KILLED"):
             g["failedOrKilled"] += 1
         g["_other"][(a.get("pool") if group_by == "user" else a.get("user")) or "?"] += mem_gbh
@@ -267,7 +276,9 @@ def yarn_get_application(cluster: str, application_id: str, service: str | None 
             "startedTime", "finishedTime", "elapsedTime", "allocatedMB", "allocatedVCores",
             "runningContainers", "memorySeconds", "vcoreSeconds", "queueUsagePercentage",
             "clusterUsagePercentage", "priority", "amHostHttpAddress", "trackingUrl", "diagnostics")
-    return _out({k: app.get(k) for k in keep if app.get(k) not in (None, "")})
+    live = ("allocatedMB", "allocatedVCores", "runningContainers")
+    return _out({k: app.get(k) for k in keep
+                 if app.get(k) not in (None, "") and not (k in live and _live(app.get(k)) is None)})
 
 
 # ---------------------------------------------------------------------------

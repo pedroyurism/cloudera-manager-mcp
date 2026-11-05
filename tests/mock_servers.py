@@ -24,9 +24,10 @@ def _app(i: int, user: str, pool: str, running: bool, mem_gbh: float, state: str
         "startTime": "2026-11-04T10:00:00.000Z",
         "endTime": None if running else "2026-11-04T11:30:00.000Z",
         "progress": 50.0 if running else None,
-        "allocatedMB": 8192 if running else None,
-        "allocatedVCores": 4 if running else None,
-        "runningContainers": 4 if running else None,
+        # como no CM real: apps terminadas vêm com -1 ("não se aplica")
+        "allocatedMB": 8192 if running else -1,
+        "allocatedVCores": 4 if running else -1,
+        "runningContainers": 4 if running else -1,
         "allocatedMemorySeconds": mem_gbh * 1024 * 3600,
         "allocatedVcoreSeconds": mem_gbh * 3600 / 2,
         "attributes": {"application_type": "SPARK"},
@@ -133,7 +134,8 @@ RM_STATIC = {
         ]}}}},
     "/ws/v1/cluster/apps/application_1700000000000_0400": {"app": {
         "id": "application_1700000000000_0400", "user": "ana", "queue": "root.analytics", "state": "FINISHED",
-        "finalStatus": "FAILED", "diagnostics": "Container killed: OOM", "elapsedTime": 1000}},
+        "finalStatus": "FAILED", "diagnostics": "Container killed: OOM", "elapsedTime": 1000,
+        "allocatedMB": -1, "allocatedVCores": -1, "runningContainers": -1}},
 }
 
 
@@ -178,6 +180,9 @@ class CMHandler(_Base):
         body = CM_STATIC.get(u.path)
         if body is None:
             return self._send(404, {"message": "nope"})
+        # como no CM real: logs só saem em text/plain; Accept só JSON dá 406
+        if "/logs/" in u.path and self.headers.get("Accept") == "application/json":
+            return self._send(406, "")
         return self._send(200, body)
 
 
