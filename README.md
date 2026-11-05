@@ -52,6 +52,18 @@ para não estourar o contexto do modelo.
 - Acesso de rede da máquina que roda o MCP até o CM (porta 7183/7180)
 - **Usuário dedicado no CM com role `Read-Only`** (Administration → Users & Roles)
 
+### Permissões do usuário no CM
+
+Com o papel `Read-Only`, 24 das 26 tools funcionam. Duas exigem mais permissão e, sem ela,
+respondem `CM API 403` (comportamento observado no CM 7.13.2):
+
+| Tool | O que é preciso |
+|---|---|
+| `list_audits` | Papel `Auditor` (ou outro que permita ler a auditoria) |
+| `list_parcels` | Papel acima de `Read-Only` com acesso a parcels |
+
+Se essas duas não forem necessárias, mantenha só o `Read-Only`.
+
 ## Instalação
 
 ```bash
@@ -125,6 +137,18 @@ Kerberos na interface web não é preciso configurar nada.
 | Web UI do RM sem autenticação | nada (padrão `YARN_RM_AUTH=none`) |
 | Kerberos/SPNEGO na web UI | `pip install -e '.[kerberos]'`, `kinit` com um principal válido e `YARN_RM_AUTH=kerberos` |
 | Acesso via Knox | `YARN_RM_URL=https://knox:8443/gateway/cdp-proxy-api/resourcemanager`, `YARN_RM_AUTH=basic`, `YARN_RM_USERNAME`/`YARN_RM_PASSWORD` |
+| MCP rodando fora da rede do cluster | `YARN_RM_URL` com um endereço alcançável (veja abaixo) |
+
+**Fora da rede do cluster.** A descoberta pelo CM devolve o hostname interno do RM
+(ex.: `http://master1:8088`), que normalmente não resolve na máquina do MCP. Nesse caso as
+tools de RM respondem *"Não foi possível conectar ao ResourceManager em ..."*. Defina
+`YARN_RM_URL` com um endereço que a máquina alcance. O mais seguro é um túnel SSH por um
+bastion, sem expor a porta do RM:
+
+```bash
+ssh -N -L 8088:master1:8088 usuario@bastion
+# e no MCP: YARN_RM_URL=http://127.0.0.1:8088  YARN_RM_TLS=false
+```
 
 Se o RM não estiver acessível, as outras 23 tools continuam funcionando normalmente.
 
@@ -171,6 +195,9 @@ Se o RM não estiver acessível, as outras 23 tools continuam funcionando normal
 - Logs e configs podem conter dados sensíveis do cliente e vão para o contexto do
   modelo. Avalie com o cliente antes de usar em produção.
 - Configurações marcadas como `sensitive` no CM já vêm mascaradas pela própria API.
+- Não exponha a porta web do RM (8088/8090) na internet para usar as tools de RM: sem
+  autenticação, a API REST do RM permite submeter aplicações e é alvo comum de ataques
+  (ex.: mineração de criptomoeda). Prefira túnel SSH, VPN ou Knox.
 - Não versione o `.env`.
 
 ## Próximos passos possíveis
