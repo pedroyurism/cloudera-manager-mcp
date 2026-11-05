@@ -6,7 +6,9 @@ import json
 import re
 import threading
 from http.server import BaseHTTPRequestHandler, HTTPServer
-from urllib.parse import parse_qs, urlparse
+from urllib.parse import parse_qs, unquote, urlparse
+
+from tests import mock_impala
 
 RM_PORT = 18088
 CM_PORT = 17180
@@ -71,6 +73,7 @@ CM_STATIC = {
     f"{V}/clusters": {"items": [{"name": "Cluster1", "displayName": "Prod", "fullVersion": "7.1.9"}]},
     f"{V}/clusters/Cluster1/services": {"items": [
         {"name": "hdfs", "type": "HDFS", "serviceState": "STARTED", "healthSummary": "GOOD", "healthChecks": []},
+        {"name": "impala", "type": "IMPALA", "serviceState": "STARTED", "healthSummary": "GOOD", "healthChecks": []},
         {"name": "yarn", "type": "YARN", "serviceState": "STARTED", "healthSummary": "BAD",
          "healthChecks": [{"name": "YARN_RESOURCEMANAGERS_HEALTH", "summary": "BAD", "explanation": "RM down"}]},
     ]},
@@ -177,6 +180,17 @@ class CMHandler(_Base):
             return self._send(200, {"items": [{"timeSeries": [
                 {"metadata": {"metricName": "cpu_percent", "entityName": "node01"},
                  "data": [{"timestamp": "t1", "value": 10}, {"timestamp": "t2", "value": 42}]}]}]})
+        imp = f"{V}/clusters/Cluster1/services/impala/impalaQueries"
+        if u.path == imp:
+            qs = mock_impala.filter_queries(q.get("filter", [""])[0])
+            off, lim = int(q.get("offset", ["0"])[0]), int(q.get("limit", ["100"])[0])
+            return self._send(200, {"queries": qs[off:off + lim],
+                                    "warnings": ["Impala query scan limit reached."] if off == 0 else []})
+        if u.path.startswith(imp + "/"):
+            qid = unquote(u.path[len(imp) + 1:])
+            if qid not in mock_impala.PROFILES:
+                return self._send(404, {"message": "query not found"})
+            return self._send(200, {"details": mock_impala.PROFILES[qid]})
         body = CM_STATIC.get(u.path)
         if body is None:
             return self._send(404, {"message": "nope"})
