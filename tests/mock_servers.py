@@ -8,6 +8,8 @@ import threading
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from urllib.parse import parse_qs, unquote, urlparse
 
+from datetime import datetime, timedelta, timezone
+
 from tests import mock_impala
 
 RM_PORT = 18088
@@ -46,6 +48,57 @@ APPS = (
 
 SEEN: list[str] = []
 
+# ---------------------------------------------------------------- relatório de saúde
+_NOW = datetime.now(timezone.utc)
+
+
+def _hb(seconds_ago: float) -> str:
+    return (_NOW - timedelta(seconds=seconds_ago)).strftime("%Y-%m-%dT%H:%M:%S.000Z")
+
+
+def _chk(**checks: str) -> list[dict]:
+    return [{"name": k, "summary": v, "suppressed": False} for k, v in checks.items()]
+
+
+GOOD_HOST_CHECKS = _chk(HOST_CLOCK_OFFSET="GOOD", HOST_MEMORY_SWAPPING="GOOD",
+                        HOST_AGENT_LOG_DIRECTORY_FREE_SPACE="GOOD", HOST_AGENT_CERTIFICATE_EXPIRY="DISABLED")
+CLUSTER_HOSTS = [
+    {**HOST, "healthSummary": "GOOD", "lastHeartbeat": _hb(10), "healthChecks": GOOD_HOST_CHECKS},
+    {"hostId": "h2", "hostname": "node02.local", "healthSummary": "CONCERNING", "lastHeartbeat": _hb(900),
+     "healthChecks": _chk(HOST_CLOCK_OFFSET="CONCERNING", HOST_MEMORY_SWAPPING="GOOD",
+                          HOST_AGENT_LOG_DIRECTORY_FREE_SPACE="GOOD")},
+    {"hostId": "h3", "hostname": "node03.local", "healthSummary": "BAD", "lastHeartbeat": _hb(5000),
+     "maintenanceMode": True, "healthChecks": _chk(HOST_MEMORY_SWAPPING="BAD")},
+    {"hostId": "h4", "hostname": "node04.local", "healthSummary": "GOOD", "healthChecks": GOOD_HOST_CHECKS},
+]
+
+
+def _role(name: str, rtype: str, host: str, state: str = "STARTED", health: str = "GOOD", **extra) -> dict:
+    return {"name": name, "type": rtype, "hostRef": {"hostId": host, "hostname": f"{host}.local"},
+            "roleState": state, "healthSummary": health, "healthChecks": [],
+            "configStalenessStatus": "FRESH", "maintenanceMode": False, **extra}
+
+
+MGMT_ROLES = {"items": [
+    _role("mgmt-SM", "SERVICEMONITOR", "h1", state="STOPPED", health="BAD"),
+    _role("mgmt-HM", "HOSTMONITOR", "h1"),
+    _role("mgmt-ES", "EVENTSERVER", "h1", health="CONCERNING",
+          healthChecks=_chk(EVENT_SERVER_EVENT_STORE_SIZE="CONCERNING")),
+]}
+
+
+def _alert(i: int, sev: str, svc: str) -> dict:
+    return {"id": f"ev{i}", "timeOccurred": _hb(60 * i), "severity": sev, "category": "HEALTH_EVENT",
+            "alert": True, "content": f"Health test changes {i}",
+            "attributes": [{"name": "SERVICE", "values": [svc]},
+                           {"name": "ALERT_SUMMARY", "values": [f"The health of service {svc} has become bad."]}]}
+
+
+# 130 alertas: força a paginação de 100 em 100
+ALERTS = ([_alert(i, "CRITICAL", "hdfs") for i in range(1, 121)]
+          + [_alert(200 + i, "IMPORTANT", "yarn") for i in range(5)]
+          + [_alert(300 + i, "CRITICAL", "zookeeper") for i in range(5)])
+
 
 def _filter_apps(flt: str) -> list[dict]:
     apps = APPS
@@ -72,10 +125,14 @@ CM_STATIC = {
     f"{V}/cm/service": {"name": "mgmt", "serviceState": "STARTED", "healthSummary": "GOOD", "healthChecks": []},
     f"{V}/clusters": {"items": [{"name": "Cluster1", "displayName": "Prod", "fullVersion": "7.1.9"}]},
     f"{V}/clusters/Cluster1/services": {"items": [
-        {"name": "hdfs", "type": "HDFS", "serviceState": "STARTED", "healthSummary": "GOOD", "healthChecks": []},
-        {"name": "impala", "type": "IMPALA", "serviceState": "STARTED", "healthSummary": "GOOD", "healthChecks": []},
+        {"name": "hdfs", "type": "HDFS", "serviceState": "STARTED", "healthSummary": "GOOD", "healthChecks": [],
+         "configStalenessStatus": "STALE", "clientConfigStalenessStatus": "FRESH"},
+        {"name": "impala", "type": "IMPALA", "serviceState": "STARTED", "healthSummary": "GOOD", "healthChecks": [],
+         "configStalenessStatus": "FRESH", "clientConfigStalenessStatus": "STALE"},
         {"name": "yarn", "type": "YARN", "serviceState": "STARTED", "healthSummary": "BAD",
          "healthChecks": [{"name": "YARN_RESOURCEMANAGERS_HEALTH", "summary": "BAD", "explanation": "RM down"}]},
+        {"name": "oozie", "type": "OOZIE", "serviceState": "STARTED", "healthSummary": "BAD", "healthChecks": [],
+         "maintenanceMode": True},
     ]},
     f"{V}/clusters/Cluster1/services/yarn": {"name": "yarn", "type": "YARN", "serviceState": "STARTED", "healthSummary": "BAD"},
     f"{V}/clusters/Cluster1/services/yarn/roles": {"items": [
@@ -91,7 +148,23 @@ CM_STATIC = {
     f"{V}/clusters/Cluster1/services/yarn/roleConfigGroups": {"items": [{"name": "yarn-RESOURCEMANAGER-BASE", "roleType": "RESOURCEMANAGER", "base": True}]},
     f"{V}/clusters/Cluster1/services/yarn/roleConfigGroups/yarn-RESOURCEMANAGER-BASE/config": {"items": [{"name": "resource_manager_java_heapsize", "value": "4294967296"}]},
     f"{V}/clusters/Cluster1/services/yarn/roles/yarn-RM-1/logs/stderr": "\n".join(f"linha {i}" for i in range(500)),
-    f"{V}/clusters/Cluster1/hosts": {"items": [HOST]},
+    f"{V}/clusters/Cluster1/services/hdfs/roles": {"items": [
+        _role("hdfs-NN-1", "NAMENODE", "h1", haStatus="ACTIVE"),
+        _role("hdfs-NN-2", "NAMENODE", "h2", haStatus="STANDBY"),
+        _role("hdfs-DN-1", "DATANODE", "h1", configStalenessStatus="STALE"),
+        _role("hdfs-DN-2", "DATANODE", "h2", state="STOPPED", health="BAD",
+              healthChecks=_chk(DATA_NODE_HOST_HEALTH="BAD")),
+        _role("hdfs-GW-1", "GATEWAY", "h1", state="NA", health="GOOD"),
+    ]},
+    f"{V}/clusters/Cluster1/services/impala/roles": {"items": [
+        _role("impala-IMPALAD-1", "IMPALAD", "h1", health="CONCERNING",
+              healthChecks=_chk(IMPALAD_QUERY_MONITORING_STATUS="CONCERNING")),
+        _role("impala-CATALOG-1", "CATALOGSERVER", "h2", configStalenessStatus="STALE_REFRESHABLE"),
+    ]},
+    f"{V}/clusters/Cluster1/services/oozie/roles": {"items": [
+        _role("oozie-SERVER-1", "OOZIE_SERVER", "h3", state="STOPPED", health="BAD")]},
+    f"{V}/clusters/Cluster1/hosts": {"items": CLUSTER_HOSTS},
+    f"{V}/cm/service/roles": MGMT_ROLES,
     f"{V}/hosts": {"items": [{**HOST, "ipAddress": "10.0.0.1", "numCores": 16, "totalPhysMemBytes": 68719476736,
                                "healthSummary": "GOOD", "roleRefs": [{}]}]},
     f"{V}/hosts/h1": {"hostId": "h1", "hostname": "127.0.0.1", "ipAddress": "10.0.0.1",
@@ -180,6 +253,9 @@ class CMHandler(_Base):
             return self._send(200, {"items": [{"timeSeries": [
                 {"metadata": {"metricName": "cpu_percent", "entityName": "node01"},
                  "data": [{"timestamp": "t1", "value": 10}, {"timestamp": "t2", "value": 42}]}]}]})
+        if u.path == f"{V}/events" and "alert==true" in q.get("query", [""])[0]:
+            off, lim = int(q.get("resultOffset", ["0"])[0]), int(q.get("maxResults", ["100"])[0])
+            return self._send(200, {"totalResults": len(ALERTS), "items": ALERTS[off:off + lim]})
         imp = f"{V}/clusters/Cluster1/services/impala/impalaQueries"
         if u.path == imp:
             qs = mock_impala.filter_queries(q.get("filter", [""])[0])

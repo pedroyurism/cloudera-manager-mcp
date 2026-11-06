@@ -4,7 +4,29 @@ Servidor MCP em Python (FastMCP + httpx) que expõe a API REST do Cloudera Manag
 para o Claude (Desktop, Claude Code ou qualquer cliente MCP). **Só faz GET**: não há
 nenhuma tool de start/stop/restart/alteração de configuração.
 
-## Tools (29)
+## Tools (30)
+
+### Relatório de saúde (1)
+
+| Tool | O que faz |
+|---|---|
+| `cluster_health_report` | **Health check completo numa chamada**, com status geral `OK` / `ATENCAO` / `CRITICO`: serviços que não estão GOOD, roles paradas ou com problema, alta disponibilidade (Active/Standby de NameNode, ResourceManager…), hosts (disco, swap, clock offset e agentes sem heartbeat), Management Service (avisa quando o **monitoramento está cego**), alertas da janela agrupados por severidade e serviço, e restart/refresh pendente. Saída em JSON ou texto (`output="text"`) |
+
+Cada problema vem em `findings` com `level` (`critico`, `atencao` ou `info`), área, entidade e
+mensagem. O status geral é o nível mais alto encontrado; `info` (ex.: serviço sem HA, entidade
+em manutenção) não muda o status. Se uma parte da API negar acesso (403), ela vira um aviso
+`acesso` e o resto do relatório sai normalmente. O mesmo relatório roda no terminal com
+[`cm-health-report`](#relatório-no-terminal-cm-health-report).
+
+| Área | Crítico | Atenção |
+|---|---|---|
+| Serviços | saúde BAD | CONCERNING, saúde desconhecida, serviço parado |
+| Roles | parada com saúde BAD, saúde BAD | parada, CONCERNING |
+| Alta disponibilidade | nenhum ACTIVE ou mais de um ACTIVE | ACTIVE sem STANDBY |
+| Hosts | saúde BAD, heartbeat mais velho que `heartbeat_stale_seconds` (120 s) | CONCERNING, heartbeat não informado |
+| Management Service | Service Monitor, Host Monitor ou Event Server fora (monitoramento cego) | Alert Publisher ou Reports Manager fora, roles CONCERNING |
+| Alertas | — | alertas CRITICAL na janela (`hours`) |
+| Restart pendente | — | configuração desatualizada em serviço/role, client config desatualizado |
 
 ### Cloudera Manager (18)
 
@@ -21,7 +43,7 @@ nenhuma tool de start/stop/restart/alteração de configuração.
 | `get_role_log` | Últimas N linhas de `full`, `stderr` ou `stdout` de uma role |
 | `list_hosts` / `get_host` | Inventário de hosts, heartbeat, roles hospedadas |
 | `query_timeseries` | Executa uma **tsquery** e devolve min/max/último valor |
-| `list_events` | Eventos (por severidade, categoria, serviço, janela em horas) |
+| `list_events` | Eventos (por severidade, categoria, serviço, janela em horas); `only_alerts=True` traz só os alertas |
 | `list_active_commands` / `get_command` | Comandos em execução e subcomandos que falharam |
 | `list_parcels` | Parcels e estágio (ACTIVATED, DISTRIBUTED…) |
 | `list_audits` | Auditoria do CM (quem fez o quê) |
@@ -83,7 +105,7 @@ para não estourar o contexto do modelo.
 
 ### Permissões do usuário no CM
 
-Com o papel `Read-Only`, 27 das 29 tools funcionam. Duas exigem mais permissão e, sem ela,
+Com o papel `Read-Only`, 28 das 30 tools funcionam. Duas exigem mais permissão e, sem ela,
 respondem `CM API 403` (comportamento observado no CM 7.13.2):
 
 | Tool | O que é preciso |
@@ -132,7 +154,7 @@ Edite o `claude_desktop_config.json`
 ```
 
 No Windows o comando fica `C:\\caminho\\cm-mcp-server\\.venv\\Scripts\\cm-mcp-stdio.exe`.
-Reinicie o Claude Desktop e as 29 tools aparecem no menu de ferramentas.
+Reinicie o Claude Desktop e as 30 tools aparecem no menu de ferramentas.
 
 ## Claude Code
 
@@ -141,6 +163,19 @@ claude mcp add cloudera-manager \
   -e CM_HOST=cm01.cliente.local -e CM_USERNAME=mcp_readonly -e CM_PASSWORD=*** \
   -- /caminho/absoluto/cm-mcp-server/.venv/bin/cm-mcp-stdio
 ```
+
+## Relatório no terminal (cm-health-report)
+
+O relatório de saúde também roda sem o Claude, para cron, CI ou checagem rápida:
+
+```bash
+cm-health-report                                   # texto legível, todos os clusters
+cm-health-report --cluster Cluster1 --hours 12     # um cluster, alertas das últimas 12 h
+cm-health-report --json > saude.json               # JSON para scripts
+cm-health-report --env-file .env                   # lê as variáveis CM_* de um arquivo
+```
+
+Código de saída: `0` OK, `1` ATENCAO, `2` CRITICO e `3` erro de conexão ou configuração.
 
 ## Modo HTTP (opcional)
 
@@ -179,7 +214,7 @@ ssh -N -L 8088:master1:8088 usuario@bastion
 # e no MCP: YARN_RM_URL=http://127.0.0.1:8088  YARN_RM_TLS=false
 ```
 
-Se o RM não estiver acessível, as outras 26 tools continuam funcionando normalmente.
+Se o RM não estiver acessível, as outras 27 tools continuam funcionando normalmente.
 
 ## Variáveis de ambiente
 
@@ -208,6 +243,14 @@ Se o RM não estiver acessível, as outras 26 tools continuam funcionando normal
 - "Qual foi o pico de CPU dos hosts na última hora?" (tsquery `select cpu_percent where category = HOST`)
 - "Teve algum evento CRITICAL de HDFS nas últimas 12 horas?"
 - "Quem reiniciou serviços ontem?" (auditoria)
+
+**Saúde do ambiente**
+
+- "Como está a saúde do ambiente? Me dá o status geral e o que precisa de atenção."
+- "Tem alguma role parada ou NameNode/ResourceManager sem standby?"
+- "O monitoramento do CM está funcionando ou está cego?"
+- "Quais alertas tivemos nas últimas 48 horas, por serviço?"
+- "Algum serviço está esperando restart por configuração alterada?"
 
 **YARN**
 

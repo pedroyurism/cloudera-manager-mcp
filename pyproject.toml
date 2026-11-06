@@ -18,6 +18,7 @@ dev = ["pytest>=8"]
 [project.scripts]
 cm-mcp-stdio = "cm_mcp_server.server:main_stdio"
 cm-mcp-http = "cm_mcp_server.server:main_http"
+cm-health-report = "cm_mcp_server.cli:main"
 
 [build-system]
 requires = ["hatchling"]
