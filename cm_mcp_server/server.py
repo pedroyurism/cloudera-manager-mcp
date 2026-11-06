@@ -276,15 +276,19 @@ def query_timeseries(tsquery: str, minutes: int = 60, desired_rollup: str = "RAW
 
 @mcp.tool()
 def list_events(hours: int = 24, severity: str | None = "CRITICAL", category: str | None = None,
-                service: str | None = None, max_results: int = 50) -> str:
+                service: str | None = None, max_results: int = 50, only_alerts: bool = False) -> str:
     """
     Eventos do CM nas últimas N horas.
     severity: CRITICAL, IMPORTANT, INFORMATIONAL (ou None para todos).
     category: HEALTH_EVENT, LOG_MESSAGE, AUDIT_EVENT, ACTIVITY_EVENT, SYSTEM (opcional).
     service: filtra pelo nome do serviço (opcional).
+    only_alerts: só eventos marcados como alerta (alert=true). Para alertas agrupados por
+    severidade e serviço, use cluster_health_report.
     """
     since = _iso(datetime.now(timezone.utc) - timedelta(hours=hours))
     filters = [f"timeReceived=ge={since}"]
+    if only_alerts:
+        filters.append("alert==true")
     if severity:
         filters.append(f"severity=={severity}")
     if category:
@@ -299,6 +303,7 @@ def list_events(hours: int = 24, severity: str | None = "CRITICAL", category: st
             "time": e.get("timeOccurred"),
             "severity": e.get("severity"),
             "category": e.get("category"),
+            "summary": (attrs.get("ALERT_SUMMARY") or [None])[0],
             "content": (e.get("content") or "")[:500],
             "service": attrs.get("SERVICE"),
             "role": attrs.get("ROLE"),
@@ -392,8 +397,8 @@ def cm_api_get(path: str, params_json: str = "{}") -> str:
     return _out(cm().get(path, params))
 
 
-# Registra as tools de YARN e de Impala (módulos separados)
-from cm_mcp_server import impala, yarn  # noqa: E402,F401
+# Registra as tools de saúde, YARN e Impala (módulos separados)
+from cm_mcp_server import health, impala, yarn  # noqa: E402,F401
 
 
 # ---------------------------------------------------------------------------
