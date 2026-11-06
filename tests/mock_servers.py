@@ -94,6 +94,32 @@ def _alert(i: int, sev: str, svc: str) -> dict:
                            {"name": "ALERT_SUMMARY", "values": [f"The health of service {svc} has become bad."]}]}
 
 
+def _cmd(cid: int, name: str, minutes_ago: float, active: bool = True, **refs) -> dict:
+    return {"id": cid, "name": name, "active": active, "startTime": _hb(minutes_ago * 60),
+            **({} if active else {"endTime": _hb(0), "success": True}), **refs}
+
+
+HDFS_REF = {"serviceRef": {"clusterName": "Cluster1", "serviceName": "hdfs"}}
+STUCK_RESTART = _cmd(20, "Restart", 180, **HDFS_REF)
+COMMANDS = {
+    "cluster": [_cmd(7, "Restart", 10, clusterRef={"clusterName": "Cluster1"})],
+    "hdfs": [STUCK_RESTART],
+    # o mesmo comando aparece em dois níveis: deve contar uma vez só
+    "impala": [_cmd(7, "Restart", 10, clusterRef={"clusterName": "Cluster1"})],
+}
+COMMAND_DETAILS = {
+    20: {**STUCK_RESTART, "children": {"items": [
+        _cmd(21, "Stop", 180, active=False, **HDFS_REF),
+        _cmd(22, "Start", 170, **HDFS_REF)]}},
+    22: {**_cmd(22, "Start", 170, **HDFS_REF), "children": {"items": [
+        _cmd(23, "Start DataNode", 170, roleRef={"clusterName": "Cluster1", "serviceName": "hdfs",
+                                                  "roleName": "hdfs-DN-2"},
+             hostRef={"hostId": "h2", "hostname": "node02.local"})]}},
+    23: _cmd(23, "Start DataNode", 170, roleRef={"clusterName": "Cluster1", "serviceName": "hdfs",
+                                                   "roleName": "hdfs-DN-2"},
+             hostRef={"hostId": "h2", "hostname": "node02.local"}),
+}
+
 # 130 alertas: força a paginação de 100 em 100
 ALERTS = ([_alert(i, "CRITICAL", "hdfs") for i in range(1, 121)]
           + [_alert(200 + i, "IMPORTANT", "yarn") for i in range(5)]
@@ -172,7 +198,11 @@ CM_STATIC = {
     f"{V}/events": {"items": [{"timeOccurred": "t", "severity": "CRITICAL", "category": "HEALTH_EVENT",
                                "content": "RM ruim", "attributes": [{"name": "SERVICE", "values": ["yarn"]}]}]},
     f"{V}/cm/commands": {"items": []},
-    f"{V}/clusters/Cluster1/commands": {"items": [{"id": 7, "name": "Restart", "active": True}]},
+    f"{V}/clusters/Cluster1/commands": {"items": COMMANDS["cluster"]},
+    f"{V}/cm/service/commands": {"items": []},
+    **{f"{V}/clusters/Cluster1/services/{svc}/commands": {"items": COMMANDS.get(svc, [])}
+       for svc in ("hdfs", "impala", "yarn", "oozie")},
+    **{f"{V}/commands/{cid}": body for cid, body in COMMAND_DETAILS.items()},
     f"{V}/commands/7": {"id": 7, "name": "Restart", "active": False, "success": False,
                         "children": {"items": [{"id": 8, "name": "Start", "success": False,
                                                 "roleRef": {"roleName": "yarn-RM-1"}}]}},

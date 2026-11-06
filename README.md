@@ -4,7 +4,7 @@ Servidor MCP em Python (FastMCP + httpx) que expõe a API REST do Cloudera Manag
 para o Claude (Desktop, Claude Code ou qualquer cliente MCP). **Só faz GET**: não há
 nenhuma tool de start/stop/restart/alteração de configuração.
 
-## Tools (30)
+## Tools (31)
 
 ### Relatório de saúde (1)
 
@@ -27,8 +27,15 @@ em manutenção) não muda o status. Se uma parte da API negar acesso (403), ela
 | Management Service | Service Monitor, Host Monitor ou Event Server fora (monitoramento cego) | Alert Publisher ou Reports Manager fora, roles CONCERNING |
 | Alertas | — | alertas CRITICAL na janela (`hours`) |
 | Restart pendente | — | configuração desatualizada em serviço/role, client config desatualizado |
+| Comandos | — | comando rodando há mais de `stuck_command_minutes` (60 min), com a etapa em que está parado |
 
-### Cloudera Manager (18)
+### Cloudera Manager (19)
+
+> Comandos: o CM lista comandos ativos separadamente em cada nível, e um comando só aparece
+> no nível em que foi disparado (um restart iniciado na página do HDFS não aparece nos
+> comandos do cluster). Por isso `list_running_commands` consulta todos os níveis e remove
+> duplicados. No LAB, a varredura padrão consulta 18 listas (cerca de 6 s); com
+> `include_roles=True`, 78 listas (cerca de 25 s).
 
 | Tool | O que faz |
 |---|---|
@@ -44,7 +51,9 @@ em manutenção) não muda o status. Se uma parte da API negar acesso (403), ela
 | `list_hosts` / `get_host` | Inventário de hosts, heartbeat, roles hospedadas |
 | `query_timeseries` | Executa uma **tsquery** e devolve min/max/último valor |
 | `list_events` | Eventos (por severidade, categoria, serviço, janela em horas); `only_alerts=True` traz só os alertas |
-| `list_active_commands` / `get_command` | Comandos em execução e subcomandos que falharam |
+| `list_running_commands` | **Todos os comandos em andamento**, em todos os níveis (CM, Management Service, clusters, serviços e, com `include_roles`, roles), com tempo de execução, **detecção de travados** (`stuck_minutes`, padrão 60) e a etapa atual (subcomando ativo mais profundo) |
+| `get_command` | Detalhe de um comando: tempo de execução, subcomandos que falharam, subcomandos em execução e a etapa atual |
+| `list_active_commands` | Comandos ativos num único nível (globais do CM ou de um cluster) |
 | `list_parcels` | Parcels e estágio (ACTIVATED, DISTRIBUTED…) |
 | `list_audits` | Auditoria do CM (quem fez o quê) |
 | `cm_api_get` | Escape hatch: GET em qualquer endpoint da API |
@@ -105,7 +114,7 @@ para não estourar o contexto do modelo.
 
 ### Permissões do usuário no CM
 
-Com o papel `Read-Only`, 28 das 30 tools funcionam. Duas exigem mais permissão e, sem ela,
+Com o papel `Read-Only`, 29 das 31 tools funcionam. Duas exigem mais permissão e, sem ela,
 respondem `CM API 403` (comportamento observado no CM 7.13.2):
 
 | Tool | O que é preciso |
@@ -154,7 +163,7 @@ Edite o `claude_desktop_config.json`
 ```
 
 No Windows o comando fica `C:\\caminho\\cm-mcp-server\\.venv\\Scripts\\cm-mcp-stdio.exe`.
-Reinicie o Claude Desktop e as 30 tools aparecem no menu de ferramentas.
+Reinicie o Claude Desktop e as 31 tools aparecem no menu de ferramentas.
 
 ## Claude Code
 
@@ -173,6 +182,7 @@ cm-health-report                                   # texto legível, todos os cl
 cm-health-report --cluster Cluster1 --hours 12     # um cluster, alertas das últimas 12 h
 cm-health-report --json > saude.json               # JSON para scripts
 cm-health-report --env-file .env                   # lê as variáveis CM_* de um arquivo
+cm-health-report --stuck-minutes 30               # comando travado a partir de 30 min
 ```
 
 Código de saída: `0` OK, `1` ATENCAO, `2` CRITICO e `3` erro de conexão ou configuração.
@@ -214,7 +224,7 @@ ssh -N -L 8088:master1:8088 usuario@bastion
 # e no MCP: YARN_RM_URL=http://127.0.0.1:8088  YARN_RM_TLS=false
 ```
 
-Se o RM não estiver acessível, as outras 27 tools continuam funcionando normalmente.
+Se o RM não estiver acessível, as outras 28 tools continuam funcionando normalmente.
 
 ## Variáveis de ambiente
 
@@ -251,6 +261,7 @@ Se o RM não estiver acessível, as outras 27 tools continuam funcionando normal
 - "O monitoramento do CM está funcionando ou está cego?"
 - "Quais alertas tivemos nas últimas 48 horas, por serviço?"
 - "Algum serviço está esperando restart por configuração alterada?"
+- "Tem algum comando travado no CM? Em que etapa ele parou?"
 
 **YARN**
 

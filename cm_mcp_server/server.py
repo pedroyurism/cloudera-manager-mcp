@@ -315,7 +315,11 @@ def list_events(hours: int = 24, severity: str | None = "CRITICAL", category: st
 
 @mcp.tool()
 def list_active_commands(cluster: str | None = None) -> str:
-    """Comandos em execução no CM (restart, deploy client config, upgrade etc.)."""
+    """
+    Comandos em execução num único nível: globais do CM (padrão) ou de um cluster.
+    Comandos disparados direto num serviço ou role não aparecem aqui; para a visão completa,
+    com tempo de execução e detecção de comandos travados, use list_running_commands.
+    """
     path = f"clusters/{cluster}/commands" if cluster else "cm/commands"
     cmds = _items(cm().get(path))
     return _out([
@@ -327,25 +331,28 @@ def list_active_commands(cluster: str | None = None) -> str:
 
 @mcp.tool()
 def get_command(command_id: int) -> str:
-    """Detalhes de um comando (inclusive subcomandos que falharam)."""
+    """
+    Detalhes de um comando: estado, tempo de execução, subcomandos que falharam e subcomandos
+    ainda em execução. Se estiver ativo, 'currentStep' é o subcomando ativo mais profundo
+    (onde um comando travado está parado).
+    """
+    from cm_mcp_server.commands import _slim, active_chain
+
+    now = datetime.now(timezone.utc)
     c = cm().get(f"commands/{command_id}")
-
-    def slim(x: dict) -> dict:
-        return {
-            "id": x.get("id"), "name": x.get("name"), "active": x.get("active"),
-            "success": x.get("success"), "resultMessage": x.get("resultMessage"),
-            "startTime": x.get("startTime"), "endTime": x.get("endTime"),
-            "service": (x.get("serviceRef") or {}).get("serviceName"),
-            "role": (x.get("roleRef") or {}).get("roleName"),
-            "host": (x.get("hostRef") or {}).get("hostname"),
-        }
-
     children = _items(c.get("children") or {})
-    return _out({
-        **slim(c),
-        "failedChildren": [slim(ch) for ch in children if ch.get("success") is False],
+    out = {
+        **_slim(c, now),
         "totalChildren": len(children),
-    })
+        "failedChildren": [_slim(ch, now) for ch in children if ch.get("success") is False],
+        "activeChildren": [_slim(ch, now) for ch in children if ch.get("active")],
+    }
+    if c.get("active"):
+        chain = active_chain(command_id, now)
+        if chain:
+            out["currentStep"] = chain[-1]
+            out["activeSteps"] = [x.get("name") for x in chain]
+    return _out(out)
 
 
 @mcp.tool()
@@ -397,8 +404,8 @@ def cm_api_get(path: str, params_json: str = "{}") -> str:
     return _out(cm().get(path, params))
 
 
-# Registra as tools de saúde, YARN e Impala (módulos separados)
-from cm_mcp_server import health, impala, yarn  # noqa: E402,F401
+# Registra as tools de saúde, comandos, YARN e Impala (módulos separados)
+from cm_mcp_server import commands, health, impala, yarn  # noqa: E402,F401
 
 
 # ---------------------------------------------------------------------------
