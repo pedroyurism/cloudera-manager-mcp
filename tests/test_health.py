@@ -16,7 +16,7 @@ import pytest
 from tests import mock_servers
 from tests.test_tools import call, ok  # importa o ambiente e sobe os servidores simulados
 
-from cm_mcp_server import cli, health  # noqa: E402
+from cm_mcp_server import cli, commands, health  # noqa: E402
 
 
 def findings(report: dict, level: str | None = None, area: str | None = None) -> list[dict]:
@@ -35,7 +35,7 @@ def report() -> dict:
 
 def test_overall_status_and_counters(report):
     assert report["overallStatus"] == "CRITICO"
-    assert report["counters"]["findings"] == {"critico": 6, "atencao": 7, "info": 2}
+    assert report["counters"]["findings"] == {"critico": 6, "atencao": 8, "info": 2}   # +1 comando travado
     c = report["counters"]
     assert c["services"] == {"total": 4, "GOOD": 2, "BAD": 1, "maintenance": 1}
     assert c["roles"]["stopped"] == 2 and c["roles"]["unhealthy"] == 1
@@ -140,24 +140,42 @@ class FakeCM:
             "cm/service/roles": {"items": [{"type": t, "roleState": "STARTED", **good}
                                            for t in ("SERVICEMONITOR", "HOSTMONITOR", "EVENTSERVER")]},
             "events": {"totalResults": len(self.alerts), "items": self.alerts},
+            "cm/commands": {"items": []},
+            "cm/service/commands": {"items": []},
+            "clusters/C/commands": {"items": []},
+            "clusters/C/services/zk/commands": {"items": []},
         }
         return data[path]
 
 
+def _fake(monkeypatch, fake: FakeCM) -> None:
+    """O relatório usa o cliente do CM em dois módulos (health e commands)."""
+    monkeypatch.setattr(health, "cm", lambda: fake)
+    monkeypatch.setattr(commands, "cm", lambda: fake)
+
+
 def test_ok_when_everything_is_healthy(monkeypatch):
-    monkeypatch.setattr(health, "cm", lambda: FakeCM())
+    _fake(monkeypatch, FakeCM())
     r = health.build_health_report()
     assert r["overallStatus"] == "OK" and r["findings"] == []
     assert "STATUS GERAL: OK" in health.render_text(r)
 
 
 def test_access_errors_do_not_break_the_report(monkeypatch):
-    monkeypatch.setattr(health, "cm", lambda: FakeCM(fail={"cm/service/roles", "events"}))
+    _fake(monkeypatch, FakeCM(fail={"cm/service/roles", "events"}))
     r = health.build_health_report()
     assert r["overallStatus"] == "ATENCAO"                     # só os avisos de acesso
     assert r["managementService"] is None and r["alerts"] is None
     assert has(r, "atencao", "acesso", "Management Service", "403")
     assert has(r, "atencao", "acesso", "alertas", "403")
+
+
+def test_command_list_errors_become_access_findings(monkeypatch):
+    _fake(monkeypatch, FakeCM(fail={"cm/commands"}))
+    r = health.build_health_report()
+    assert r["overallStatus"] == "ATENCAO"
+    assert has(r, "atencao", "acesso", "comandos", "cm/commands", "403")
+    assert r["commands"]["running"] == 0 and r["commands"]["errors"]
     assert r["clusters"][0]["services"]["GOOD"] == 1           # o resto do relatório saiu
 
 
@@ -165,7 +183,7 @@ def test_cli_json_and_exit_codes(capsys, monkeypatch):
     assert cli.main(["--cluster", "Cluster1", "--json"]) == 2
     out = json.loads(capsys.readouterr().out)
     assert out["overallStatus"] == "CRITICO"
-    monkeypatch.setattr(health, "cm", lambda: FakeCM())
+    _fake(monkeypatch, FakeCM())
     assert cli.main([]) == 0
     assert "STATUS GERAL: OK" in capsys.readouterr().out
     monkeypatch.setattr(health, "build_health_report", lambda *a, **k: (_ for _ in ()).throw(RuntimeError("x")))

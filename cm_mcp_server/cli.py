@@ -37,6 +37,8 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--hours", type=float, default=24, help="janela dos alertas em horas (padrão 24)")
     ap.add_argument("--heartbeat-seconds", type=int, default=120,
                     help="idade máxima do heartbeat do agente (padrão 120)")
+    ap.add_argument("--stuck-minutes", type=float, default=60,
+                    help="minutos para considerar um comando travado (padrão 60)")
     ap.add_argument("--json", action="store_true", help="saída em JSON")
     ap.add_argument("--env-file", help="arquivo .env com as variáveis CM_*")
     args = ap.parse_args(argv)
@@ -50,7 +52,8 @@ def main(argv: list[str] | None = None) -> int:
     from cm_mcp_server.health import build_health_report, render_text
 
     try:
-        report = build_health_report(args.cluster, args.hours, args.heartbeat_seconds)
+        report = build_health_report(args.cluster, args.hours, args.heartbeat_seconds,
+                                     stuck_command_minutes=args.stuck_minutes)
     except Exception as e:  # noqa: BLE001
         print(f"Erro ao consultar o Cloudera Manager: {e}", file=sys.stderr)
         return 3

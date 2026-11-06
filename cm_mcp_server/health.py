@@ -9,6 +9,7 @@ Junta numa única chamada o que um health check de plantão olha:
     monitoramento está cego;
   - alertas (eventos com alert=true) da janela, agrupados por severidade e serviço;
   - serviços e roles com configuração desatualizada (restart/refresh pendente);
+  - comandos em andamento em todos os níveis, avisando os travados;
 e calcula um status geral: OK, ATENCAO ou CRITICO.
 """
 
@@ -18,6 +19,7 @@ from collections import Counter, defaultdict
 from datetime import datetime, timedelta, timezone
 from typing import Any
 
+from cm_mcp_server.commands import collect_running_commands
 from cm_mcp_server.core import _items, _iso, _out, cm, mcp
 
 LEVELS = ("critico", "atencao", "info")
@@ -310,12 +312,34 @@ def _stale_services(rep: _Report, cluster: str, services: list[dict], stale_role
     return {"services": rows, "count": len(rows)}
 
 
+def _commands(rep: _Report, cluster: str | None, stuck_minutes: float) -> dict:
+    data = collect_running_commands(cluster, stuck_minutes, include_roles=False)
+    for cmd in data["commands"]:
+        if not cmd["stuck"]:
+            continue
+        where = "/".join(cmd[k] for k in ("cluster", "service", "role") if cmd.get(k)) or cmd["scope"]
+        step = cmd.get("currentStep")
+        step_txt = ""
+        if step:
+            place = step.get("role") or step.get("host")
+            step_txt = (f"; etapa atual: {step.get('name')}" + (f" em {place}" if place else "")
+                        + (f" há {step['elapsedMin']} min" if step.get("elapsedMin") is not None else ""))
+        rep.add("atencao", "comandos", f"{where} #{cmd.get('id')}",
+                f"comando '{cmd.get('name')}' rodando há {cmd.get('elapsedMin')} min "
+                f"(limite {stuck_minutes:g} min){step_txt}")
+    if data.get("errors"):
+        rep.add("atencao", "acesso", "comandos",
+                f"não foi possível ler {len(data['errors'])} lista(s) de comandos: {data['errors'][0]}"[:300])
+    return data
+
+
 # ---------------------------------------------------------------------------
 # Relatório
 # ---------------------------------------------------------------------------
 
 def build_health_report(cluster: str | None = None, hours: float = 24, heartbeat_stale_seconds: int = 120,
-                        max_alerts: int = 500, latest_alerts: int = 10) -> dict:
+                        max_alerts: int = 500, latest_alerts: int = 10,
+                        stuck_command_minutes: float = 60) -> dict:
     rep = _Report()
     c = cm()
     report: dict[str, Any] = {"generatedAt": _iso(datetime.now(timezone.utc))}
@@ -342,6 +366,7 @@ def build_health_report(cluster: str | None = None, hours: float = 24, heartbeat
 
     report["managementService"] = rep.guard("acesso", "Management Service", _management, rep)
     report["alerts"] = rep.guard("acesso", "alertas", _alerts, rep, hours, max_alerts, latest_alerts)
+    report["commands"] = rep.guard("acesso", "comandos", _commands, rep, cluster, stuck_command_minutes)
 
     rep.findings.sort(key=lambda f: LEVELS.index(f["level"]))
     levels = Counter(f["level"] for f in rep.findings)
@@ -352,7 +377,9 @@ def build_health_report(cluster: str | None = None, hours: float = 24, heartbeat
                    f"{levels.get('info', 0)} informativo(s)",
         **report,
         "counters": {k: dict(v) for k, v in totals.items()}
-        | {"alerts": (report["alerts"] or {}).get("bySeverity", {}), "findings": dict(levels)},
+        | {"alerts": (report["alerts"] or {}).get("bySeverity", {}),
+           "commands": {k: (report["commands"] or {}).get(k, 0) for k in ("running", "stuck")},
+           "findings": dict(levels)},
         "findings": rep.findings,
     }
     return report
@@ -407,27 +434,40 @@ def render_text(r: dict) -> str:
             lines.append("  Por serviço: " + ", ".join(f"{x['service']} {x['total']}" for x in a["byService"][:8]))
         for e in a["latest"][:5]:
             lines.append(f"  {e['time']} {e['severity']:13s} {e['service']}: {e['summary']}")
+        lines.append("")
+    cmds = r.get("commands")
+    if cmds:
+        lines.append(f"Comandos em andamento: {cmds['running']} (travados {cmds['stuck']}, "
+                     f"limite {cmds['stuckMinutes']:g} min)")
+        for x in cmds["commands"][:10]:
+            where = "/".join(x[k] for k in ("cluster", "service", "role") if x.get(k)) or x["scope"]
+            step = (x.get("currentStep") or {}).get("name")
+            lines.append(f"  {'TRAVADO ' if x['stuck'] else ''}#{x.get('id')} {x.get('name')} em {where}, "
+                         f"há {x.get('elapsedMin')} min" + (f"; etapa atual: {step}" if step else ""))
     return "\n".join(lines).rstrip() + "\n"
 
 
 @mcp.tool()
 def cluster_health_report(cluster: str | None = None, hours: float = 24, output: str = "json",
                           heartbeat_stale_seconds: int = 120, max_alerts: int = 500,
-                          latest_alerts: int = 10) -> str:
+                          latest_alerts: int = 10, stuck_command_minutes: float = 60) -> str:
     """
     Relatório de saúde completo do ambiente com status geral OK / ATENCAO / CRITICO.
     Cobre serviços que não estão GOOD (com os checks que falharam), roles paradas ou com
     problema, alta disponibilidade (Active/Standby de NameNode, ResourceManager etc.), hosts
     (checks de disco, swap e clock offset e agentes sem heartbeat recente), Management Service
     (avisa quando o monitoramento está cego), alertas da janela agrupados por severidade e
-    serviço, e restart/refresh pendente por configuração desatualizada.
+    serviço, restart/refresh pendente por configuração desatualizada e comandos em andamento
+    em todos os níveis (travados viram atenção).
     Cada problema vem em 'findings' com level critico, atencao ou info.
     cluster: um cluster específico (padrão: todos).
     hours: janela dos alertas.
     output: 'json' (padrão) ou 'text' (relatório legível).
     heartbeat_stale_seconds: idade máxima do último heartbeat do agente (padrão 120 s).
+    stuck_command_minutes: a partir de quantos minutos um comando é considerado travado (padrão 60).
     """
     if output not in ("json", "text"):
         return "output deve ser 'json' ou 'text'."
-    report = build_health_report(cluster, hours, heartbeat_stale_seconds, max_alerts, latest_alerts)
+    report = build_health_report(cluster, hours, heartbeat_stale_seconds, max_alerts, latest_alerts,
+                                 stuck_command_minutes)
     return _out(render_text(report) if output == "text" else report)
