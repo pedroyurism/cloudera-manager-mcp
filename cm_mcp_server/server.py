@@ -8,6 +8,7 @@ Configuração por variáveis de ambiente (veja .env.example).
 from __future__ import annotations
 
 import json
+import re
 from datetime import datetime, timedelta, timezone
 from typing import Any
 
@@ -173,14 +174,57 @@ def get_role_config_groups(cluster: str, service: str, only_non_default: bool = 
     return _out(out)
 
 
+LOG_KINDS = ("full", "stderr", "stdout")
+
+
+def _tail(text: str, tail_lines: int, grep: str | None) -> str:
+    """Últimas linhas do texto; com grep, só as que casam (regex, sem diferenciar maiúsculas)."""
+    lines = text.splitlines()
+    if grep:
+        try:
+            pattern = re.compile(grep, re.IGNORECASE)
+        except re.error as e:
+            raise ValueError(f"grep inválido: {e}") from e
+        lines = [ln for ln in lines if pattern.search(ln)]
+        if not lines:
+            return f"Nenhuma linha casou com '{grep}'."
+    return _out("\n".join(lines[-max(1, tail_lines):]))
+
+
 @mcp.tool()
-def get_role_log(cluster: str, service: str, role: str, log: str = "stderr", tail_lines: int = 200) -> str:
-    """Últimas linhas do log de uma role. log: 'full' (log do processo), 'stderr' ou 'stdout'."""
-    if log not in ("full", "stderr", "stdout"):
+def get_role_log(cluster: str, service: str, role: str, log: str = "stderr", tail_lines: int = 200,
+                 grep: str | None = None) -> str:
+    """Últimas linhas do log de uma role. log: 'full' (log do processo), 'stderr' ou 'stdout'.
+    grep: regex opcional (sem diferenciar maiúsculas) para filtrar as linhas, ex.: 'ERROR|FATAL'."""
+    if log not in LOG_KINDS:
         return "log deve ser 'full', 'stderr' ou 'stdout'."
     text = cm().get(f"clusters/{cluster}/services/{service}/roles/{role}/logs/{log}", raw=True)
-    lines = text.splitlines()[-max(1, tail_lines):]
-    return _out("\n".join(lines))
+    return _tail(text, tail_lines, grep)
+
+
+@mcp.tool()
+def get_mgmt_role_log(role: str, log: str = "full", tail_lines: int = 200, grep: str | None = None) -> str:
+    """Log de uma role do Cloudera Management Service (Service Monitor, Host Monitor, Event Server,
+    Alert Publisher, Reports Manager...). role: nome da role ou só o tipo, ex.: 'SERVICEMONITOR'.
+    log: 'full', 'stderr' ou 'stdout'. grep: regex opcional para filtrar as linhas, ex.: 'ERROR|WARN'."""
+    if log not in LOG_KINDS:
+        return "log deve ser 'full', 'stderr' ou 'stdout'."
+    c = cm()
+    roles = _items(c.get("cm/service/roles"))
+    match = [r for r in roles if role in (r.get("name"), r.get("type"))]
+    if not match:
+        disponiveis = ", ".join(f"{r.get('type')} ({r.get('name')})" for r in roles)
+        return f"Role '{role}' não encontrada no Management Service. Disponíveis: {disponiveis}"
+    text = c.get(f"cm/service/roles/{match[0]['name']}/logs/{log}", raw=True)
+    return _tail(text, tail_lines, grep)
+
+
+@mcp.tool()
+def get_cm_server_log(tail_lines: int = 200, grep: str | None = None) -> str:
+    """Log do próprio Cloudera Manager Server (cloudera-scm-server.log).
+    grep: regex opcional para filtrar as linhas, ex.: 'ERROR|WARN|Exception'."""
+    text = cm().get("cm/log", raw=True)
+    return _tail(text, tail_lines, grep)
 
 
 # ---------------------------------------------------------------------------
