@@ -191,6 +191,8 @@ CM_STATIC = {
         _role("oozie-SERVER-1", "OOZIE_SERVER", "h3", state="STOPPED", health="BAD")]},
     f"{V}/clusters/Cluster1/hosts": {"items": CLUSTER_HOSTS},
     f"{V}/cm/service/roles": MGMT_ROLES,
+    f"{V}/cm/service/roles/mgmt-SM/logs/full": "INFO ok\nWARN canary lento\nERROR Task stuck\nINFO fim",
+    f"{V}/cm/log": "INFO boot\nERROR db pool exhausted\nWARN slow request\nINFO ok",
     f"{V}/hosts": {"items": [{**HOST, "ipAddress": "10.0.0.1", "numCores": 16, "totalPhysMemBytes": 68719476736,
                                "healthSummary": "GOOD", "roleRefs": [{}]}]},
     f"{V}/hosts/h1": {"hostId": "h1", "hostname": "127.0.0.1", "ipAddress": "10.0.0.1",
@@ -301,7 +303,8 @@ class CMHandler(_Base):
         if body is None:
             return self._send(404, {"message": "nope"})
         # como no CM real: logs só saem em text/plain; Accept só JSON dá 406
-        if "/logs/" in u.path and self.headers.get("Accept") == "application/json":
+        if (("/logs/" in u.path or u.path.endswith("/cm/log"))
+                and self.headers.get("Accept") == "application/json"):
             return self._send(406, "")
         return self._send(200, body)
 

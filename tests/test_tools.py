@@ -49,7 +49,8 @@ def test_tool_registry():
         async with Client(mcp) as c:
             return {t.name for t in await c.list_tools()}
     names = asyncio.run(run())
-    assert len(names) == 31
+    assert len(names) == 33
+    assert {"get_mgmt_role_log", "get_cm_server_log"} <= names
     assert {"yarn_list_applications", "yarn_top_consumers", "yarn_queue_usage",
             "yarn_scheduler_queues", "yarn_cluster_metrics", "yarn_utilization_report",
             "yarn_get_application", "yarn_application_attributes"} <= names
@@ -64,6 +65,27 @@ def test_cm_tools_still_work():
     assert ok("query_timeseries", tsquery="select cpu_percent where category = HOST")[0]["max"] == 42
     err, _ = call("cm_api_get", path="naoexiste")
     assert err
+
+
+def test_log_grep_filters_lines():
+    assert ok("get_role_log", cluster="Cluster1", service="yarn", role="yarn-RM-1",
+              grep="linha 49[89]") == "linha 498\nlinha 499"
+    assert "Nenhuma linha" in ok("get_role_log", cluster="Cluster1", service="yarn", role="yarn-RM-1", grep="xyz")
+    err, msg = call("get_role_log", cluster="Cluster1", service="yarn", role="yarn-RM-1", grep="(")
+    assert err and "grep inválido" in msg
+
+
+def test_mgmt_role_log_by_type_or_name():
+    by_type = ok("get_mgmt_role_log", role="SERVICEMONITOR", grep="error|warn")
+    assert by_type == "WARN canary lento\nERROR Task stuck"
+    assert ok("get_mgmt_role_log", role="mgmt-SM", tail_lines=1) == "INFO fim"
+    missing = ok("get_mgmt_role_log", role="NAOEXISTE")
+    assert "não encontrada" in missing and "SERVICEMONITOR (mgmt-SM)" in missing
+
+
+def test_cm_server_log():
+    assert ok("get_cm_server_log", tail_lines=2) == "WARN slow request\nINFO ok"
+    assert ok("get_cm_server_log", grep="ERROR") == "ERROR db pool exhausted"
 
 
 def test_list_running_applications():

@@ -47,7 +47,9 @@ em manutenção) não muda o status. Se uma parte da API negar acesso (403), ela
 | `list_roles` | Roles de um serviço (opção `only_unhealthy`) |
 | `get_service_config` | Configs de serviço (padrão: só valores alterados) |
 | `get_role_config_groups` | Role config groups e suas configs alteradas |
-| `get_role_log` | Últimas N linhas de `full`, `stderr` ou `stdout` de uma role |
+| `get_role_log` | Últimas N linhas de `full`, `stderr` ou `stdout` de uma role; `grep` (regex) filtra as linhas, ex.: `ERROR\|FATAL` |
+| `get_mgmt_role_log` | Log de uma role do **Management Service** (Service Monitor, Host Monitor, Event Server…), pelo nome ou só pelo tipo (`SERVICEMONITOR`); aceita `grep` |
+| `get_cm_server_log` | Log do próprio **Cloudera Manager Server** (`cloudera-scm-server.log`); aceita `grep` |
 | `list_hosts` / `get_host` | Inventário de hosts, heartbeat, roles hospedadas |
 | `query_timeseries` | Executa uma **tsquery** e devolve min/max/último valor |
 | `list_events` | Eventos (por severidade, categoria, serviço, janela em horas); `only_alerts=True` traz só os alertas |
