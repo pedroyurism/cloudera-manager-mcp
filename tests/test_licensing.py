@@ -267,3 +267,11 @@ def test_cli_consolidated(fake, tmp_path, capsys):
     assert cli.license_main(["--out", str(tmp_path)]) == 0
     out = capsys.readouterr().out
     assert "F (Streaming): 1 nodes" in out and "102 arredondada" in out
+
+
+def test_hyperthreading_question_covers_vms():
+    no_ht = licensing._ht_question({"cores": 60, "logicalCores": 60, "physicalCores": 60}, 100.0)["text"]
+    assert "não vê hyperthreading" in no_ht and "cada vCPU conta como core" in no_ht
+    assert "lscpu" in no_ht and "cerca de 110 CCU" in no_ht           # 100 + 60/6
+    ht = licensing._ht_question({"cores": 64, "logicalCores": 64, "physicalCores": 32}, 50.0)["text"]
+    assert "64 cores lógicos e 32 físicos" in ht and "maior valor" in ht
