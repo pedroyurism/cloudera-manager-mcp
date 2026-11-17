@@ -409,6 +409,18 @@ def _findings(r: dict) -> list[dict]:
     return out
 
 
+def _ht_question(t: dict, ccu_os: float) -> dict:
+    """Ponto a validar sobre hyperthreading, considerando que em VM cada vCPU conta como core."""
+    if t["logicalCores"] > t["physicalCores"] > 0:
+        return {"topic": "Hyperthreading", "text": f"os hosts têm {t['logicalCores']} cores lógicos e "
+                f"{t['physicalCores']} físicos; o cálculo usou os lógicos, que é o maior valor."}
+    return {"topic": "Hyperthreading", "text": f"o Cloudera Manager informa {t['cores']} cores, sem diferença entre "
+            "lógicos e físicos: o sistema operacional não vê hyperthreading. Em VM, cada vCPU conta como core e "
+            "esse já é o número usado; o HT do servidor físico só muda a conta se o contrato contar os cores do "
+            "hipervisor. Em servidor físico, confirme com lscpu (Thread(s) per core) se o HT está desligado na "
+            f"BIOS: ligado, a parcela de cores dobraria e o total iria a cerca de {br(ccu_os + t['cores'] / 6, 0)} CCU."}
+
+
 def _questions(r: dict) -> list[dict]:
     os_, nom = r["ccu"]["os"], r["ccu"]["nominal"]
     t = r["totals"]
@@ -421,14 +433,7 @@ def _questions(r: dict) -> list[dict]:
                                                f"{os_['roundedPerNode']} CCU (base SO) ou {nom['roundedPerNode']} "
                                                "(nominal).")},
     ]
-    if any(h["hyperthreading"] for h in r["hosts"]):
-        qs.append({"topic": "Hyperthreading", "text": f"os hosts têm {t['logicalCores']} cores lógicos e "
-                   f"{t['physicalCores']} físicos; o cálculo usou os lógicos."})
-    else:
-        extra = t["cores"] / 6
-        qs.append({"topic": "Hyperthreading", "text": f"o Cloudera Manager informa {t['cores']} cores, sem diferença "
-                   "entre lógicos e físicos. Se o hyperthreading estiver ligado e os cores lógicos forem o dobro, "
-                   f"a parcela de cores dobra e o total iria a cerca de {br(os_['total'] + extra, 0)} CCU."})
+    qs.append(_ht_question(t, os_["total"]))
     if r["otherHosts"]:
         names = ", ".join(o["short"] for o in r["otherHosts"][:12]) + ("…" if len(r["otherHosts"]) > 12 else "")
         qs.append({"topic": "Quais Nodes contam", "text": f"o cálculo inclui os {t['nodes']} hosts do cluster. O mesmo "
@@ -666,7 +671,7 @@ def render_html(r: dict) -> str:
     tiles = "".join([
         _tile("Nodes", str(t["nodes"]), "1 cluster"),
         _tile("Cores", str(t["cores"]), "com hyperthreading" if t["logicalCores"] > t["physicalCores"] > 0
-              else "sem hyperthreading"),
+              else "sem HT visível ao SO"),
         _tile("Memória", f"{br(t['memoryOsGB'], 1 if t['memoryOsGB'] < 1000 else 0)} GB", "vista pelo SO"),
         _tile("Pico de CPU", f"{br(t['cpuPeakPct'], 1)}%" if t["cpuPeakPct"] is not None else "—",
               f"média horária, {peak_host['short']}" if peak_host else "sem dados"),
@@ -800,7 +805,7 @@ def render_html(r: dict) -> str:
         <tbody>
           <tr><td>Node</td><td class="r">{t['nodes']}</td><td class="muted">todos rodam serviço ou cliente Cloudera</td></tr>
           <tr><td>Cluster</td><td class="r">1</td><td class="muted">{_e(name)}{_e(f"; o mesmo CM gerencia outros {len(others)} hosts fora dele") if others else ""}</td></tr>
-          <tr><td>Core</td><td class="r">{t['cores']}</td><td class="muted">{t['logicalCores']} lógicos, {t['physicalCores']} físicos</td></tr>
+          <tr><td>Core</td><td class="r">{t['cores']}</td><td class="muted">{t['logicalCores']} lógicos, {t['physicalCores']} físicos; em VM, cada vCPU conta como core</td></tr>
           <tr><td>CGU (GPU)</td><td class="r">0</td><td class="muted">{gpu_note}</td></tr>
           <tr><td>Agent (MiNiFi)</td><td class="r">0</td><td class="muted">não medido pelo Cloudera Manager</td></tr>
         </tbody>
@@ -1010,13 +1015,7 @@ def _consolidated_questions(c: dict) -> list[dict]:
         {"topic": "Arredondamento", "text": "a página não define; arredondando cada Node para cima, o total vai a "
                                             f"{os_['roundedPerNode']} CCU."},
     ]
-    if t["logicalCores"] > t["physicalCores"] > 0:
-        qs.append({"topic": "Hyperthreading", "text": f"os hosts têm {t['logicalCores']} cores lógicos e "
-                   f"{t['physicalCores']} físicos; o cálculo usou os lógicos."})
-    else:
-        qs.append({"topic": "Hyperthreading", "text": f"o Cloudera Manager informa {t['cores']} cores, sem diferença entre "
-                   "lógicos e físicos. Se o HT estiver ligado, a parcela de cores dobra e o total iria a cerca de "
-                   f"{br(os_['total'] + t['cores'] / 6, 0)} CCU."})
+    qs.append(_ht_question(t, os_["total"]))
     if "streaming" in products:
         qs.append({"topic": "Data Under Management do Streaming", "text": "definir se conta o dado do Kafka com ou sem "
                    "réplicas e se os repositórios do NiFi entram."})
@@ -1174,7 +1173,7 @@ def render_consolidated_html(c: dict) -> str:
       {_tile("CCU arredondada", str(c['ccu']['os']['roundedPerNode']), "cada Node para cima", True)}
       {_tile("Data Under Mgmt", dum_tile, dum_sub, True)}
       {_tile("Nodes", str(t['nodes']), split)}
-      {_tile("Cores", str(t['cores']), "com hyperthreading" if t['logicalCores'] > t['physicalCores'] > 0 else "sem hyperthreading")}
+      {_tile("Cores", str(t['cores']), "com hyperthreading" if t['logicalCores'] > t['physicalCores'] > 0 else "sem HT visível ao SO")}
       {_tile("Memória", f"{br(t['memoryOsGB'], 0)} GB", "vista pelo SO")}
     </div>
     <div class="toggle" role="group" aria-label="Base de memória do cálculo">
