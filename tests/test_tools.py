@@ -58,7 +58,10 @@ def test_tool_registry():
 
 def test_cm_tools_still_work():
     assert ok("cm_info")["apiVersion"] == "v51"
-    assert ok("list_clusters")[0]["name"] == "Cluster1"
+    clusters = {c["name"]: c["clusterType"] for c in ok("list_clusters")}
+    # compute (NiFi) e experience (Data Services) clusters só vêm com clusterType=any
+    assert clusters == {"Cluster1": "BASE_CLUSTER", "Flow Manager": "COMPUTE_CLUSTER",
+                        "Data Services": "EXPERIENCE_CLUSTER"}
     summary = ok("cluster_health_summary", cluster="Cluster1")
     assert summary[0]["service"] == "yarn"
     assert ok("get_role_log", cluster="Cluster1", service="yarn", role="yarn-RM-1", tail_lines=2) == "linha 498\nlinha 499"

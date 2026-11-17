@@ -145,11 +145,17 @@ def _ts(name: str, metric: str, values: list[float]) -> dict:
             "data": [{"timestamp": f"t{i}", "value": v} for i, v in enumerate(values)]}
 
 
+CLUSTERS = [
+    {"name": "Cluster1", "displayName": "Prod", "fullVersion": "7.1.9", "clusterType": "BASE_CLUSTER"},
+    {"name": "Flow Manager", "displayName": "Flow Manager", "fullVersion": "7.1.9", "clusterType": "COMPUTE_CLUSTER"},
+    {"name": "Data Services", "displayName": "Data Services", "fullVersion": "1.5.5",
+     "clusterType": "EXPERIENCE_CLUSTER"},
+]
+
 CM_STATIC = {
     "/api/version": "v51",
     f"{V}/cm/version": {"version": "7.13.1"},
     f"{V}/cm/service": {"name": "mgmt", "serviceState": "STARTED", "healthSummary": "GOOD", "healthChecks": []},
-    f"{V}/clusters": {"items": [{"name": "Cluster1", "displayName": "Prod", "fullVersion": "7.1.9"}]},
     f"{V}/clusters/Cluster1/services": {"items": [
         {"name": "hdfs", "type": "HDFS", "serviceState": "STARTED", "healthSummary": "GOOD", "healthChecks": [],
          "configStalenessStatus": "STALE", "clientConfigStalenessStatus": "FRESH"},
@@ -270,6 +276,11 @@ class CMHandler(_Base):
             apps = _filter_apps(q.get("filter", [""])[0])
             off, lim = int(q.get("offset", ["0"])[0]), int(q.get("limit", ["100"])[0])
             return self._send(200, {"applications": apps[off:off + lim], "warnings": []})
+        if u.path == f"{V}/clusters":
+            # como no CM real: sem clusterType=any só vêm os BASE_CLUSTER
+            items = [c for c in CLUSTERS if q.get("clusterType", [""])[0] == "any"
+                     or c["clusterType"] == "BASE_CLUSTER"]
+            return self._send(200, {"items": items})
         if u.path == f"{V}/timeseries":
             query = q.get("query", [""])[0]
             if "fair_share" in query:   # simula Capacity Scheduler: métricas de fair share inexistentes

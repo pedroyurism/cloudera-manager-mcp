@@ -124,15 +124,23 @@ class FakeCM:
     def __init__(self, fail: set[str] | None = None, alerts: list | None = None):
         self.fail = fail or set()
         self.alerts = alerts or []
+        self.calls: list[tuple[str, dict]] = []
 
     def get(self, path, params=None, raw=False):
+        self.calls.append((path, params or {}))
         if path in self.fail:
             raise RuntimeError(f"CM API 403 em GET {path}: User not allowed to perform operation.")
         good = {"healthSummary": "GOOD", "healthChecks": [], "configStalenessStatus": "FRESH"}
         data = {
             "cm/version": {"version": "7.13.2"},
             "clusters": {"items": [{"name": "C"}]},
-            "clusters/C/services": {"items": [{"name": "zk", "serviceState": "STARTED", **good}]},
+            "clusters/C/services": {"items": [
+                {"name": "zk", "serviceState": "STARTED", **good},
+                # serviço lógico (liga compute cluster ao SDX): sempre NOT_AVAILABLE, não é problema
+                {"name": "dcc", "type": "DATA_CONTEXT_CONNECTOR", "serviceState": "STARTED",
+                 "healthSummary": "NOT_AVAILABLE", "healthChecks": [], "configStalenessStatus": "FRESH"}]},
+            "clusters/C/services/dcc/roles": {"items": []},
+            "clusters/C/services/dcc/commands": {"items": []},
             "clusters/C/services/zk/roles": {"items": [
                 {"name": "zk-1", "type": "SERVER", "roleState": "STARTED", "hostRef": {"hostname": "a"}, **good}]},
             "clusters/C/hosts": {"items": [{"hostname": "a", "lastHeartbeat": mock_servers._hb(5), **good}]},
@@ -155,9 +163,12 @@ def _fake(monkeypatch, fake: FakeCM) -> None:
 
 
 def test_ok_when_everything_is_healthy(monkeypatch):
-    _fake(monkeypatch, FakeCM())
+    fake = FakeCM()
+    _fake(monkeypatch, fake)
     r = health.build_health_report()
     assert r["overallStatus"] == "OK" and r["findings"] == []
+    # sem cluster, lista todos os tipos (base, compute e experience)
+    assert ("clusters", {"clusterType": "any"}) in fake.calls
     assert "STATUS GERAL: OK" in health.render_text(r)
 
 

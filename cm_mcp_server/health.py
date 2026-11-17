@@ -26,6 +26,9 @@ LEVELS = ("critico", "atencao", "info")
 STATUS_BY_LEVEL = {"critico": "CRITICO", "atencao": "ATENCAO"}
 UNKNOWN_HEALTH = ("UNKNOWN", "HISTORY_NOT_AVAILABLE", "NOT_AVAILABLE")
 STOPPED_STATES = ("STOPPED", "UNKNOWN", "HISTORY_NOT_AVAILABLE")
+# Serviços lógicos, sem processo nem health check: o CM sempre informa NOT_AVAILABLE.
+# DATA_CONTEXT_CONNECTOR liga um compute cluster (ex.: NiFi/Flow Management) ao SDX do base cluster.
+NO_HEALTH_SERVICE_TYPES = {"DATA_CONTEXT_CONNECTOR"}
 
 # Roles do Management Service e o que se perde quando cada uma está fora.
 MGMT_ROLES = {
@@ -106,7 +109,7 @@ def _services(rep: _Report, cluster: str) -> tuple[list[dict], dict]:
             rep.add("critico", "servicos", f"{cluster}/{name}", f"saúde BAD{detail}")
         elif health == "CONCERNING":
             rep.add("atencao", "servicos", f"{cluster}/{name}", f"saúde CONCERNING{detail}")
-        elif health in UNKNOWN_HEALTH:
+        elif health in UNKNOWN_HEALTH and s.get("type") not in NO_HEALTH_SERVICE_TYPES:
             rep.add("atencao", "servicos", f"{cluster}/{name}",
                     f"saúde {health}: o CM não está recebendo dados desse serviço")
         if s.get("serviceState") == "STOPPED":
@@ -346,7 +349,8 @@ def build_health_report(cluster: str | None = None, hours: float = 24, heartbeat
     report["cm"] = {"apiVersion": c.version,
                     "version": (rep.guard("acesso", "versão do CM", c.get, "cm/version") or {}).get("version")}
 
-    clusters = [cluster] if cluster else [x.get("name") for x in _items(c.get("clusters"))]
+    # clusterType=any inclui compute clusters (ex.: NiFi/Flow Management) e experience clusters (ECS)
+    clusters = [cluster] if cluster else [x.get("name") for x in _items(c.get("clusters", {"clusterType": "any"}))]
     report["clusters"] = []
     totals: dict[str, Counter] = defaultdict(Counter)
     for name in clusters:

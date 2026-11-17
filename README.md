@@ -60,7 +60,7 @@ executável. Também roda no terminal com
 | Tool | O que faz |
 |---|---|
 | `cm_info` | Versão do CM, versão da API e saúde do Management Service |
-| `list_clusters` | Clusters, versão do runtime, status |
+| `list_clusters` | Todos os clusters do CM, inclusive compute clusters (ex.: NiFi/Flow Management) e experience clusters (Data Services/ECS), com tipo, versão e status |
 | `list_services` | Serviços do cluster com estado, saúde, stale config |
 | `cluster_health_summary` | Só o que **não** está GOOD: serviços, roles e checks que falharam |
 | `get_service` | Detalhe de um serviço e seus health checks |

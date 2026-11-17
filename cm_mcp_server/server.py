@@ -37,8 +37,9 @@ def cm_info() -> str:
 
 @mcp.tool()
 def list_clusters() -> str:
-    """Lista os clusters gerenciados, com versão do runtime, status e saúde."""
-    clusters = _items(cm().get("clusters", {"view": "full"}))
+    """Lista os clusters gerenciados (base, compute e experience/Data Services), com versão, tipo e saúde."""
+    # sem clusterType=any a API só devolve BASE_CLUSTER (omite compute e experience clusters)
+    clusters = _items(cm().get("clusters", {"view": "full", "clusterType": "any"}))
     return _out([
         {
             "name": cl.get("name"),
