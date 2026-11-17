@@ -65,9 +65,9 @@ def main(argv: list[str] | None = None) -> int:
 
 def license_main(argv: list[str] | None = None) -> int:
     """
-    cm-license-report --cluster SPtrans                 # grava HTML em ~/cm-reports
-    cm-license-report --cluster SPtrans --format pdf    # HTML + PDF (Edge/Chrome headless)
-    cm-license-report --cluster SPtrans --format json   # JSON completo no stdout
+    cm-license-report --cluster Cluster1                # grava HTML em ~/cm-reports
+    cm-license-report --cluster Cluster1 --format pdf   # HTML + PDF (Edge/Chrome headless)
+    cm-license-report --cluster Cluster1 --format json  # JSON completo no stdout
     """
     ap = argparse.ArgumentParser(prog="cm-license-report",
                                  description="Levantamento de capacidade e licenciamento Cloudera (CCU, DUM, CUM).")
