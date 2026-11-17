@@ -1,8 +1,9 @@
 """
 Testes do levantamento de licenciamento (license_report e cm-license-report).
 
-Cenário com um CM falso em memória: cluster P com 2 workers (DataNode), 1 master com /var
-cheio e discos de dados vazios, 1 edge ocioso com hyperthreading e 1 host fora do cluster.
+Cenário com um CM falso em memória: cluster base P com 2 workers (DataNode), 1 master com /var
+cheio e discos de dados vazios e 1 edge ocioso com hyperthreading; compute cluster F (NiFi e
+Kafka) com 1 host; e 1 host sem cluster.
 """
 
 from __future__ import annotations
@@ -22,20 +23,21 @@ MEM_256, MEM_128, MEM_64 = 269913153536, 134630666240, 66992615424
 
 def _host(hid, cores, mem, physical=None, cluster="P"):
     return {"hostId": hid, "hostname": f"{hid}.corp", "numCores": cores, "numPhysicalCores": physical or cores,
-            "totalPhysMemBytes": mem, "clusterRef": {"clusterName": cluster},
+            "totalPhysMemBytes": mem, **({"clusterRef": {"clusterName": cluster}} if cluster else {}),
             "distribution": {"name": "RHEL", "version": "8.10"}}
 
 
 HOSTS = [_host("w1", 64, MEM_256), _host("w2", 64, MEM_256), _host("m1", 32, MEM_128),
-         _host("e1", 32, MEM_128, physical=16), _host("x1", 4, MEM_64, cluster="Outro")]
+         _host("e1", 32, MEM_128, physical=16), _host("x1", 4, MEM_64, cluster="F"),
+         _host("u1", 8, MEM_64, cluster=None)]
 
 # (host, mount, capacidade, % usado)
 FS = [("w1", "/", 100 * GIB, 3), ("w1", "/data1", TIB, 80), ("w1", "/data2", TIB, 60),
       ("w2", "/", 100 * GIB, 3), ("w2", "/data1", TIB, 78), ("w2", "/data2", TIB, 5),
       ("m1", "/", 100 * GIB, 2), ("m1", "/var", 300 * GIB, 85), ("m1", "/data1", TIB, 0), ("m1", "/data2", TIB, 1),
-      ("e1", "/", 100 * GIB, 2)]
+      ("e1", "/", 100 * GIB, 2), ("x1", "/data1", TIB, 10)]
 # (cpu pico %, memória usada mín/máx em %)
-USAGE = {"w1": (3.0, (59, 62)), "w2": (2.5, (58, 61)), "m1": (7.9, (45, 46)), "e1": (2.0, (8, 10))}
+USAGE = {"w1": (3.0, (59, 62)), "w2": (2.5, (58, 61)), "m1": (7.9, (45, 46)), "e1": (2.0, (8, 10)), "x1": (15.0, (40, 45))}
 
 
 def _series(metric, values, **attrs):
@@ -80,7 +82,14 @@ class FakeCM:
             return self._ts(params["query"])
         role = lambda n, t, h: {"name": n, "type": t, "hostRef": {"hostId": h}}  # noqa: E731
         data = {
-            "clusters/P": {"name": "P", "displayName": "Produção", "fullVersion": "7.1.9-1.cdh7.1.9.p0"},
+            "clusters": {"items": [{"name": "P"}, {"name": "F"}]},
+            "clusters/P": {"name": "P", "displayName": "Produção", "fullVersion": "7.1.9-1.cdh7.1.9.p0",
+                           "clusterType": "BASE_CLUSTER"},
+            "clusters/F": {"name": "F", "displayName": "Fluxo", "fullVersion": "7.1.9", "clusterType": "COMPUTE_CLUSTER"},
+            "clusters/F/services": {"items": [{"name": "nifi", "type": "NIFI"}, {"name": "kafka", "type": "KAFKA"}]},
+            "clusters/F/hosts": {"items": [{"hostId": "x1"}]},
+            "clusters/F/services/nifi/roles": {"items": [role("n1", "NIFI_NODE", "x1")]},
+            "clusters/F/services/kafka/roles": {"items": [role("k1", "KAFKA_BROKER", "x1")]},
             "cm/version": {"version": "7.13.1"},
             "clusters/P/services": {"items": [{"name": "hdfs", "type": "HDFS"}, {"name": "impala", "type": "IMPALA"},
                                               {"name": "kudu", "type": "KUDU"}, {"name": "ozone", "type": "OZONE"}]},
@@ -155,9 +164,9 @@ def test_findings_and_questions(report):
     assert {licensing._host_status(h)[1] for h in report["hosts"]} == {"disco", "/var 85%", "ocioso"}
     topics = {q["topic"]: q["text"] for q in report["questions"]}
     assert "94,79" in topics["Base de memória"] and "96,00" in topics["Base de memória"]
-    assert "outros 1 hosts" in topics["Quais Nodes contam"] and "x1" in topics["Quais Nodes contam"]
+    assert "outros 2 hosts" in topics["Quais Nodes contam"] and "x1" in topics["Quais Nodes contam"]
     assert "Ozone" in topics["Dados brutos ou lógicos"]
-    assert report["otherHosts"][0]["cluster"] == "Outro"
+    assert {o["short"]: o.get("cluster") for o in report["otherHosts"]} == {"x1": "F", "u1": None}
 
 
 def test_partial_failure_becomes_warning(monkeypatch):
@@ -200,3 +209,61 @@ def test_cli(fake, tmp_path, capsys):
     assert "94.79 CCU" in out and "HTML:" in out
     assert cli.license_main(["--cluster", "P", "--format", "json"]) == 0
     assert json.loads(capsys.readouterr().out)["totals"]["nodes"] == 4
+
+
+# --- consolidado ---------------------------------------------------------------------------
+
+def test_classify_product():
+    assert licensing.classify_product("EXPERIENCE_CLUSTER", ["ECS", "DOCKER"]) == "data_services"
+    assert licensing.classify_product("COMPUTE_CLUSTER", ["NIFI", "KAFKA", "ZOOKEEPER"]) == "streaming"
+    assert licensing.classify_product("COMPUTE_CLUSTER", ["HIVE", "SPARK_ON_YARN"]) == "base"
+    assert licensing.classify_product("BASE_CLUSTER", ["HDFS", "KAFKA", "NIFI"]) == "base"
+
+
+@pytest.fixture
+def consolidated(fake) -> dict:
+    return licensing.build_consolidated_report()
+
+
+def test_consolidated_metrics_per_product(consolidated):
+    c = consolidated
+    assert [(x["name"], x["product"]) for x in c["clusters"]] == [("P", "base"), ("F", "streaming")]
+    assert c["displayName"] == "Produção"                      # nome do único cluster base
+    assert c["totals"]["nodes"] == 5 and c["totals"]["clusters"] == 2
+    x1 = 4 / 6 + MEM_64 / GIB / 12
+    assert c["ccu"]["os"]["total"] == pytest.approx(94.79 + x1, abs=0.01)
+    assert c["ccu"]["os"]["roundedPerNode"] == 96 + 6
+    assert c["dataUnderManagementTB"]["base"] == pytest.approx(1 + 1 / 1024, abs=1e-4)
+    assert c["dataUnderManagementTB"]["streaming"] == pytest.approx(0.1, abs=1e-4)   # teto: 10% de 1 TB
+    assert set(c["ccuByProduct"]) == {"base", "streaming"}
+    assert [h["short"] for h in c["unassignedHosts"]] == ["u1"]
+
+
+def test_consolidated_findings_and_questions(consolidated):
+    titles = [f["title"] for f in consolidated["findings"]]
+    assert "P: HDFS a 75%" in titles and "P: /var do m1 em 85%" in titles
+    assert "1 host(s) sem cluster" in titles
+    assert "Capacity Under Management não é cobrada" in titles
+    topics = [q["topic"] for q in consolidated["questions"]]
+    assert "Produto do NiFi" in topics and "Data Under Management do Streaming" in topics
+    assert "Dados compartilhados" not in topics                  # sem Data Services no cenário
+
+
+def test_consolidated_html_and_tool(consolidated, tmp_path):
+    paths = licensing.write_report(consolidated, "html", str(tmp_path))
+    page = Path(paths["html"]).read_text(encoding="utf-8")
+    assert Path(paths["html"]).name.startswith("licenciamento-consolidado-produ-o-")
+    assert "<title>Produção Licenciamento Consolidado</title>" in page
+    assert "Cloudera Streaming (NiFi / CFM)" in page and "CCU + Data Under Management" in page
+    assert page.count('data-base="nominal" hidden') >= 4
+    res = ok("license_report", output="html", output_dir=str(tmp_path))      # sem cluster = consolidado
+    assert res["summary"]["totals"]["roundedPerNode"] == 102
+    assert [x["product"] for x in res["summary"]["clusters"]] == ["Base", "Streaming"]
+    full = ok("license_report")
+    assert "otherHosts" not in full["clusters"][0]["report"]                 # JSON compacto
+
+
+def test_cli_consolidated(fake, tmp_path, capsys):
+    assert cli.license_main(["--out", str(tmp_path)]) == 0
+    out = capsys.readouterr().out
+    assert "F (Streaming): 1 nodes" in out and "102 arredondada" in out

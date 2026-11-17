@@ -65,13 +65,14 @@ def main(argv: list[str] | None = None) -> int:
 
 def license_main(argv: list[str] | None = None) -> int:
     """
-    cm-license-report --cluster Cluster1                # grava HTML em ~/cm-reports
+    cm-license-report                                   # consolidado de todos os clusters (HTML)
+    cm-license-report --cluster Cluster1                # um cluster, grava HTML em ~/cm-reports
     cm-license-report --cluster Cluster1 --format pdf   # HTML + PDF (Edge/Chrome headless)
     cm-license-report --cluster Cluster1 --format json  # JSON completo no stdout
     """
     ap = argparse.ArgumentParser(prog="cm-license-report",
                                  description="Levantamento de capacidade e licenciamento Cloudera (CCU, DUM, CUM).")
-    ap.add_argument("--cluster", required=True, help="nome interno do cluster")
+    ap.add_argument("--cluster", help="nome interno do cluster (padrão: consolidado de todos os clusters)")
     ap.add_argument("--format", choices=("html", "pdf", "json"), default="html")
     ap.add_argument("--days", type=float, default=7, help="janela de uso em dias (padrão 7)")
     ap.add_argument("--out", help="pasta de saída (padrão CM_REPORT_DIR ou ~/cm-reports)")
@@ -85,16 +86,21 @@ def license_main(argv: list[str] | None = None) -> int:
     if hasattr(sys.stdout, "reconfigure"):
         sys.stdout.reconfigure(encoding="utf-8")
 
-    from cm_mcp_server.licensing import DEFAULT_DATA_MOUNTS, build_license_report, write_report
+    from cm_mcp_server.licensing import (DEFAULT_DATA_MOUNTS, _compact_consolidated, build_consolidated_report,
+                                         build_license_report, write_report)
 
+    mounts = args.data_mounts or DEFAULT_DATA_MOUNTS
     try:
-        report = build_license_report(args.cluster, args.days, args.data_mounts or DEFAULT_DATA_MOUNTS,
-                                      args.nominal_step)
+        if args.cluster:
+            report = build_license_report(args.cluster, args.days, mounts, args.nominal_step)
+        else:
+            report = build_consolidated_report(args.days, mounts, args.nominal_step)
     except Exception as e:  # noqa: BLE001
         print(f"Erro ao consultar o Cloudera Manager: {e}", file=sys.stderr)
         return 3
     if args.format == "json":
-        print(json.dumps(report, ensure_ascii=False, indent=2))
+        data = _compact_consolidated(report) if report.get("kind") == "consolidated" else report
+        print(json.dumps(data, ensure_ascii=False, indent=2))
         return 0
     try:
         paths = write_report(report, args.format, args.out)
@@ -102,8 +108,15 @@ def license_main(argv: list[str] | None = None) -> int:
         print(f"Erro ao gravar o relatório: {e}", file=sys.stderr)
         return 4
     o = report["ccu"]["os"]
-    print(f"{report['cluster']}: {report['totals']['nodes']} nodes, {o['total']} CCU (RAM do SO), "
-          f"{report['ccu']['nominal']['total']} CCU (RAM nominal)")
+    if report.get("kind") == "consolidated":
+        for c in report["clusters"]:
+            print(f"{c['name']} ({c['label']}): {c['report']['totals']['nodes']} nodes, "
+                  f"{c['report']['ccu']['os']['total']} CCU")
+        print(f"Total: {report['totals']['nodes']} nodes, {o['total']} CCU (RAM do SO), "
+              f"{report['ccu']['nominal']['total']} CCU (RAM nominal), {o['roundedPerNode']} arredondada")
+    else:
+        print(f"{report['cluster']}: {report['totals']['nodes']} nodes, {o['total']} CCU (RAM do SO), "
+              f"{report['ccu']['nominal']['total']} CCU (RAM nominal)")
     for kind, path in paths.items():
         print(f"{kind.upper()}: {path}")
     return 0

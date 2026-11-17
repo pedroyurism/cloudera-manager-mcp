@@ -33,7 +33,23 @@ em manutenção) não muda o status. Se uma parte da API negar acesso (403), ela
 
 | Tool | O que faz |
 |---|---|
-| `license_report` | **Levantamento de capacidade e licenciamento** de um cluster pela página [Cloudera Licensed Metrics](https://www.cloudera.com/legal/commercial-terms-and-conditions/cloudera-licensed-metrics.html): cores, memória, uso dos últimos `days` dias (pico de CPU, faixa de memória, swap) e discos de dados por host; **CCU** por Node (`cores ÷ 6 + GB ÷ 12`) em duas bases de memória (RAM vista pelo SO e RAM nominal) e com arredondamento por Node; **Data Under Management** (HDFS usado ÷ replicação + Kudu ÷ 3, e o valor bruto) e **Capacity Under Management** (capacidade do HDFS e soma de todos os volumes de dados). Gera achados (HDFS ou `/var` cheios, volumes desbalanceados, hosts ociosos, discos vazios fora dos DataNodes), pontos a validar no Order Form e lista os hosts do mesmo CM fora do cluster. `output="json"`, `"html"` ou `"pdf"` |
+| `license_report` | **Levantamento de capacidade e licenciamento** de um cluster pela página [Cloudera Licensed Metrics](https://www.cloudera.com/legal/commercial-terms-and-conditions/cloudera-licensed-metrics.html): cores, memória, uso dos últimos `days` dias (pico de CPU, faixa de memória, swap) e discos de dados por host; **CCU** por Node (`cores ÷ 6 + GB ÷ 12`) em duas bases de memória (RAM vista pelo SO e RAM nominal) e com arredondamento por Node; **Data Under Management** (HDFS usado ÷ replicação + Kudu ÷ 3, e o valor bruto) e **Capacity Under Management** (capacidade do HDFS e soma de todos os volumes de dados). Gera achados (HDFS ou `/var` cheios, volumes desbalanceados, hosts ociosos, discos vazios fora dos DataNodes), pontos a validar no Order Form e lista os hosts do mesmo CM fora do cluster. **Sem `cluster`, gera o consolidado de todos os clusters do CM** (veja abaixo). `output="json"`, `"html"` ou `"pdf"` |
+
+**Consolidado (sem `cluster`).** Junta todos os clusters do CM (base, compute e experience) e
+aplica a cada um a métrica do seu produto, pelo modelo on-premises em vigor desde fevereiro de
+2025 ([pricing update](https://www.cloudera.com/products/pricing/pricing-update.html)):
+
+| Produto | Como é identificado | Métrica |
+|---|---|---|
+| Cloudera Base | base cluster (ou compute cluster com HDFS, Hive ou Impala) | CCU + Data Under Management (HDFS ÷ replicação + Kudu ÷ 3) |
+| Cloudera Streaming | compute cluster com NiFi/CFM, Kafka, Schema Registry, SMM, SSB ou Flink | CCU + Data Under Management (teto: espaço ocupado nos volumes de dados) |
+| Cloudera Data Services | experience cluster ou serviço ECS | só CCU |
+
+A página consolidada traz o total de CCU (as duas bases de memória e o arredondado), a fatia de
+cada cluster, a CCU por host agrupada por cluster com o uso real ao lado, a Data Under
+Management por produto, os achados (inclusive cluster com muita CCU e pouco uso e hosts sem
+cluster) e os pontos a validar no Order Form. O arquivo sai como
+`licenciamento-consolidado-<base>-<AAAAMMDD>.html`.
 
 Regras do cálculo: 1 GB = 1.024 MB e 1 TB = 1.024 GB; vale o maior número entre cores
 lógicos e físicos; a RAM nominal é a do SO arredondada para cima em múltiplos de
@@ -212,6 +228,7 @@ Código de saída: `0` OK, `1` ATENCAO, `2` CRITICO e `3` erro de conexão ou co
 ## Licenciamento no terminal (cm-license-report)
 
 ```bash
+cm-license-report                                           # consolidado de todos os clusters
 cm-license-report --cluster CLUSTER-LAB                       # grava o HTML em ~/cm-reports
 cm-license-report --cluster CLUSTER-LAB --format pdf          # HTML + PDF
 cm-license-report --cluster CLUSTER-LAB --format json > lic.json
@@ -300,6 +317,7 @@ Se o RM não estiver acessível, as outras 31 tools continuam funcionando normal
 
 - "Quantas CCU o cluster CLUSTER-LAB consome pela RAM do SO e pela RAM nominal?"
 - "Gera o levantamento de licenciamento do LAB em PDF para eu mandar para o time."
+- "Faz o licenciamento consolidado de todos os clusters do CM, com a métrica de cada produto."
 - "Qual a Data Under Management e a Capacity Under Management do cluster?"
 
 **YARN**

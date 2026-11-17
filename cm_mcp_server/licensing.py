@@ -36,6 +36,7 @@ GIB = 1024**3
 TIB = 1024**4
 DEFAULT_DATA_MOUNTS = r"^/(data|dfs|grid|disk|hadoop)[\w.-]*$"
 METRICS_URL = "https://www.cloudera.com/legal/commercial-terms-and-conditions/cloudera-licensed-metrics.html"
+PRICING_UPDATE_URL = "https://www.cloudera.com/products/pricing/pricing-update.html"
 
 # Nome curto das roles mais comuns, para a coluna "Função principal".
 ROLE_LABELS = {
@@ -266,6 +267,7 @@ def build_license_report(cluster: str, days: float = 7, data_mount_regex: str = 
 
     report = {
         "cluster": cluster, "displayName": cl.get("displayName") or cluster,
+        "clusterType": cl.get("clusterType"),
         "runtimeVersion": cl.get("fullVersion"), "cmVersion": cm_version,
         "generatedAt": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
         "usageWindowDays": days, "dataMountRegex": data_mount_regex,
@@ -872,13 +874,373 @@ def _slug(s: str) -> str:
     return re.sub(r"[^A-Za-z0-9_-]+", "-", s).strip("-").lower() or "cluster"
 
 
+# ---------------------------------------------------------------------------
+# Consolidado: todos os clusters do CM, cada um com a métrica do seu produto
+# ---------------------------------------------------------------------------
+
+# Métricas on-premises desde fev/2025 (https://www.cloudera.com/products/pricing/pricing-update.html):
+# Base e Streaming = compute (CCU) + Data Under Management; Data Services = só compute.
+PRODUCTS = {
+    "base": {"label": "Base", "name": "Cloudera Base", "metric": "CCU + Data Under Management",
+             "dum": True, "color": "var(--steel)"},
+    "streaming": {"label": "Streaming", "name": "Cloudera Streaming (NiFi / CFM)",
+                  "metric": "CCU + Data Under Management", "dum": True, "color": "var(--amber)"},
+    "data_services": {"label": "Data Services", "name": "Cloudera Data Services (ECS)",
+                      "metric": "Só CCU (compute)", "dum": False, "color": "var(--ds)"},
+}
+STREAMING_SERVICES = {"NIFI", "NIFIREGISTRY", "KAFKA", "SCHEMAREGISTRY", "STREAMS_MESSAGING_MANAGER",
+                      "SQL_STREAM_BUILDER", "FLINK"}
+
+
+def classify_product(cluster_type: str | None, services: list[str]) -> str:
+    """Produto Cloudera de um cluster, pelo tipo e pelos serviços."""
+    svc = set(services)
+    if cluster_type == "EXPERIENCE_CLUSTER" or "ECS" in svc:
+        return "data_services"
+    if cluster_type == "COMPUTE_CLUSTER" and svc & STREAMING_SERVICES and not svc & {"HDFS", "HIVE", "IMPALA"}:
+        return "streaming"
+    return "base"
+
+
+def build_consolidated_report(days: float = 7, data_mount_regex: str = DEFAULT_DATA_MOUNTS,
+                              nominal_memory_step_gb: int = 8) -> dict:
+    names = [c.get("name") for c in _items(cm().get("clusters", {"clusterType": "any"}))]
+    clusters = []
+    for name in names:
+        r = build_license_report(name, days, data_mount_regex, nominal_memory_step_gb)
+        product = classify_product(r.get("clusterType"), r["services"])
+        if product == "base":
+            dum = {"tb": r["dataUnderManagement"]["logicalTB"], "rawTB": r["dataUnderManagement"]["rawTB"],
+                   "kind": "lógico (HDFS ÷ replicação + Kudu ÷ 3)"}
+        elif product == "streaming":
+            used = sum(v["used"] for h in r["hosts"] for v in h["dataVolumes"])
+            dum = {"tb": round(used / TIB, 6), "rawTB": round(used / TIB, 6),
+                   "kind": "teto: espaço ocupado nos volumes de dados (Kafka com réplicas + repositórios do NiFi)"}
+        else:
+            dum = None
+        info = PRODUCTS[product]
+        clusters.append({"name": name, "product": product, "label": info["label"], "productName": info["name"],
+                         "metric": info["metric"], "dataUnderManagement": dum, "report": r})
+    order = list(PRODUCTS)
+    clusters.sort(key=lambda c: (order.index(c["product"]), c["name"]))
+
+    in_cluster = {h["hostId"] for c in clusters for h in c["report"]["hosts"]}
+    unassigned = {o["hostId"]: o for c in clusters for o in c["report"]["otherHosts"]
+                  if not o.get("cluster") and o["hostId"] not in in_cluster}
+
+    def tot(base: str, key: str) -> float:
+        return round(sum(c["report"]["ccu"][base][key] for c in clusters), 2)
+
+    reps = [c["report"] for c in clusters]
+    bases = [c["report"]["displayName"] for c in clusters if c["product"] == "base"]
+    env_name = bases[0] if len(bases) == 1 else "Ambiente"
+    report = {
+        # "cluster" vira o nome do arquivo: licenciamento-consolidado-<ambiente>-<data>
+        "kind": "consolidated", "cluster": f"consolidado-{env_name}",
+        # nome do ambiente: o do único cluster Base (os compute/experience clusters dependem dele)
+        "displayName": env_name,
+        "generatedAt": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+        "cmVersion": reps[0]["cmVersion"] if reps else None, "usageWindowDays": days,
+        "os": next((r["os"] for r in reps if r["os"]), None),
+        "clusters": clusters,
+        "totals": {
+            "clusters": len(clusters),
+            "nodes": sum(r["totals"]["nodes"] for r in reps), "cores": sum(r["totals"]["cores"] for r in reps),
+            "logicalCores": sum(r["totals"]["logicalCores"] for r in reps),
+            "physicalCores": sum(r["totals"]["physicalCores"] for r in reps),
+            "memoryOsGB": round(sum(r["totals"]["memoryOsGB"] for r in reps), 2),
+            "memoryNominalGB": sum(r["totals"]["memoryNominalGB"] for r in reps),
+            "dataVolumesTB": round(sum(r["capacityUnderManagement"]["allDataVolumesTB"] for r in reps), 3),
+        },
+        "ccu": {b: {"total": tot(b, "total"), "cores": tot(b, "cores"), "memory": tot(b, "memory"),
+                    "roundedPerNode": sum(r["ccu"][b]["roundedPerNode"] for r in reps)} for b in ("os", "nominal")},
+        "ccuByProduct": {p: round(sum(c["report"]["ccu"]["os"]["total"] for c in clusters if c["product"] == p), 2)
+                         for p in order if any(c["product"] == p for c in clusters)},
+        "dataUnderManagementTB": {p: round(sum(c["dataUnderManagement"]["tb"] for c in clusters if c["product"] == p), 4)
+                                  for p in ("base", "streaming") if any(c["product"] == p for c in clusters)},
+        "unassignedHosts": list(unassigned.values()),
+        "warnings": [f"{c['name']}: {w}" for c in clusters for w in c["report"]["warnings"]],
+    }
+    report["findings"] = _consolidated_findings(report)
+    report["questions"] = _consolidated_questions(report)
+    return report
+
+
+def _consolidated_findings(c: dict) -> list[dict]:
+    out: list[dict] = []
+    total = c["ccu"]["os"]["total"] or 1
+    for cl in c["clusters"]:
+        r = cl["report"]
+        share = 100 * r["ccu"]["os"]["total"] / total
+        peak = r["totals"]["cpuPeakPct"]
+        mem_max = max((h["memoryUsedPct"][1] for h in r["hosts"] if h["memoryUsedPct"]), default=None)
+        if peak is not None and peak < 20 and share >= 25 and mem_max is not None and mem_max < 50:
+            out.append({"level": "warn", "title": f"{cl['name']}: {br(r['ccu']['os']['total'], 0)} CCU com pouco uso",
+                        "text": f"É {br(share, 0)}% do total de CCU. O pico de CPU foi {br(peak, 1)}% e a memória não passou "
+                                f"de {br(mem_max, 0)}%. Como a CCU é cobrada pelo recurso disponível, é o maior potencial de "
+                                "redução."})
+        for f in r["findings"]:
+            if f["level"] == "warn" or (f["level"] == "note" and f["title"].startswith("Hosts ociosos")):
+                out.append({**f, "title": f"{cl['name']}: {f['title']}"})
+        if cl["product"] == "streaming" and (r["ccu"]["os"]["memorySharePct"] or 0) >= 80:
+            out.append({"level": "note", "title": f"{cl['name']}: quase toda a CCU vem da memória",
+                        "text": f"{br(r['ccu']['os']['memorySharePct'], 0)}% das {br(r['ccu']['os']['total'])} CCU vêm da "
+                                "parcela de memória, o que é típico do NiFi."})
+    if c["unassignedHosts"]:
+        out.append({"level": "warn", "title": f"{len(c['unassignedHosts'])} host(s) sem cluster",
+                    "text": "Hosts gerenciados pelo CM que não pertencem a nenhum cluster: "
+                            + ", ".join(h["short"] for h in c["unassignedHosts"]) + ". Se rodarem algum produto Cloudera, "
+                            "entram na contagem de Nodes."})
+    out.append({"level": "info", "title": "Capacity Under Management não é cobrada",
+                "text": "Nenhum dos produtos usa essa métrica no modelo atual. Se algum contrato antigo usar, os volumes de "
+                        f"dados somam {br(c['totals']['dataVolumesTB'], 1)} TB."})
+    return out
+
+
+def _consolidated_questions(c: dict) -> list[dict]:
+    products = {cl["product"] for cl in c["clusters"]}
+    t, os_, nom = c["totals"], c["ccu"]["os"], c["ccu"]["nominal"]
+    qs = []
+    if "streaming" in products:
+        qs.append({"topic": "Produto do NiFi", "text": "confirmar se o CFM está contratado como Cloudera Streaming "
+                   "(CCU + Data Under Management) ou num contrato antigo por node ou core."})
+    qs += [
+        {"topic": "Base de memória", "text": f"RAM vista pelo SO ({br(os_['total'])} CCU no total) ou RAM nominal "
+                                             f"({br(nom['total'])} CCU)."},
+        {"topic": "Arredondamento", "text": "a página não define; arredondando cada Node para cima, o total vai a "
+                                            f"{os_['roundedPerNode']} CCU."},
+    ]
+    if t["logicalCores"] > t["physicalCores"] > 0:
+        qs.append({"topic": "Hyperthreading", "text": f"os hosts têm {t['logicalCores']} cores lógicos e "
+                   f"{t['physicalCores']} físicos; o cálculo usou os lógicos."})
+    else:
+        qs.append({"topic": "Hyperthreading", "text": f"o Cloudera Manager informa {t['cores']} cores, sem diferença entre "
+                   "lógicos e físicos. Se o HT estiver ligado, a parcela de cores dobra e o total iria a cerca de "
+                   f"{br(os_['total'] + t['cores'] / 6, 0)} CCU."})
+    if "streaming" in products:
+        qs.append({"topic": "Data Under Management do Streaming", "text": "definir se conta o dado do Kafka com ou sem "
+                   "réplicas e se os repositórios do NiFi entram."})
+    if "data_services" in products and "base" in products:
+        qs.append({"topic": "Dados compartilhados", "text": "o Data Services lê os dados do Base (HDFS e Ozone); eles já "
+                   "estão na Data Under Management do Base e não devem ser contados de novo."})
+    return qs
+
+
+CONSOLIDATED_CSS = """
+:root{--ds:#4f7a4a}
+@media screen and (prefers-color-scheme: dark){:root:not([data-theme="light"]){--ds:#8cc283}}
+:root[data-theme="dark"]{--ds:#8cc283}
+.stackwrap{display:flex;flex-direction:column;gap:10px;background:var(--surface);border:1px solid var(--line);border-radius:6px;padding:18px}
+.stack{display:flex;height:22px;border-radius:3px;overflow:hidden;background:var(--bg)}
+tr.grp td{font:500 11px/1.3 var(--font-mono);text-transform:uppercase;letter-spacing:.08em;color:var(--steel);background:var(--steel-soft)}
+tr.sub td{font-weight:600;color:var(--muted)}
+.metric{display:grid;grid-template-columns:repeat(auto-fit,minmax(240px,1fr));gap:14px}
+.metric>*{min-width:0}
+.metric .card{border-top:4px solid var(--c)}
+.metric .tag{font:500 11px/1 var(--font-mono);text-transform:uppercase;letter-spacing:.1em;color:var(--muted)}
+@media print{tfoot{display:table-row-group}}  /* o total só no fim da tabela, sem repetir a cada página */
+"""
+
+
+def _mem_range(r: dict) -> str:
+    vals = [v for h in r["hosts"] if h["memoryUsedPct"] for v in h["memoryUsedPct"]]
+    return f"{round(min(vals))}–{round(max(vals))}%" if vals else "—"
+
+
+def _dum_text(cl: dict) -> str:
+    d = cl["dataUnderManagement"]
+    if d is None:
+        return "não se aplica"
+    if cl["product"] == "streaming":
+        return f"≤ {tb(d['tb'])} TB brutos"
+    return f"{tb(d['tb'])} TB lógico"
+
+
+def render_consolidated_html(c: dict) -> str:
+    t, clusters = c["totals"], c["clusters"]
+    date = datetime.strptime(c["generatedAt"], "%Y-%m-%dT%H:%M:%SZ").strftime("%d/%m/%Y")
+    days = c["usageWindowDays"]
+    hidden = {"os": "", "nominal": " hidden"}
+
+    def stack(b: str) -> str:
+        total = c["ccu"][b]["total"] or 1
+        segs, leg = [], []
+        for cl in clusters:
+            v = cl["report"]["ccu"][b]["total"]
+            color = PRODUCTS[cl["product"]]["color"]
+            segs.append(f'<div style="width:{100 * v / total:.3f}%;background:{color}" title="{_e(cl["name"])}: {br(v)} CCU"></div>')
+            leg.append(f'<span><i style="background:{color}"></i>{_e(cl["name"])} · {br(v)} CCU ({br(100 * v / total, 0)}%)</span>')
+        return (f'<div class="stackwrap" data-base="{b}"{hidden[b]}><div class="stack" role="img" aria-label="CCU por cluster">'
+                f'{"".join(segs)}</div><div class="legend">{"".join(leg)}</div></div>')
+
+    rows = []
+    for cl in clusters:
+        r = cl["report"]
+        rows.append(f'<tr><td class="host">{_e(cl["name"])}</td><td>{_e(PRODUCTS[cl["product"]]["name"])}</td>'
+                    f'<td>{_e(cl["metric"])}</td><td class="r">{r["totals"]["nodes"]}</td><td class="r">{r["totals"]["cores"]}</td>'
+                    f'<td class="r">{br(r["totals"]["memoryOsGB"], 0)} GB</td>'
+                    f'<td class="r">{br(r["totals"]["cpuPeakPct"], 1) + "%" if r["totals"]["cpuPeakPct"] is not None else "—"}</td>'
+                    f'<td class="r">{_mem_range(r)}</td>'
+                    f'<td class="r" data-base="os"><b>{br(r["ccu"]["os"]["total"])}</b></td>'
+                    f'<td class="r" data-base="nominal" hidden><b>{br(r["ccu"]["nominal"]["total"])}</b></td>'
+                    f'<td class="r">{r["ccu"]["os"]["roundedPerNode"]}</td><td class="r">{_e(_dum_text(cl))}</td></tr>')
+
+    def host_table(b: str) -> str:
+        out = []
+        for cl in clusters:
+            r = cl["report"]
+            group = cl["name"] if cl["name"] == cl["label"] else f'{cl["name"]} · {cl["label"]}'
+            out.append(f'<tr class="grp"><td colspan="8">{_e(group)}</td></tr>')
+            for h in sorted(r["hosts"], key=lambda h: h["short"]):
+                x = h["ccu"][b]
+                mem = h["memoryOsGB"] if b == "os" else h["memoryNominalGB"]
+                use = (f'{br(h["cpuPeakPct"], 1)}% · {_range(h["memoryUsedPct"])}' if h["cpuPeakPct"] is not None else "—")
+                out.append(f'<tr><td class="host" title="{_e(h["hostname"])}">{_e(h["short"])}</td><td class="r">{h["cores"]}</td>'
+                           f'<td class="r">{br(mem)} GB</td><td class="r">{br(x["cores"], 3)}</td><td class="r">{br(x["memory"], 3)}</td>'
+                           f'<td class="r"><b>{br(x["total"], 3)}</b></td><td class="r">{x["rounded"]}</td><td class="r">{use}</td></tr>')
+            s = r["ccu"][b]
+            mem_s = r["totals"]["memoryOsGB"] if b == "os" else r["totals"]["memoryNominalGB"]
+            out.append(f'<tr class="sub"><td>Subtotal</td><td class="r">{r["totals"]["cores"]}</td><td class="r">{br(mem_s)} GB</td>'
+                       f'<td class="r">{br(s["cores"])}</td><td class="r">{br(s["memory"])}</td><td class="r">{br(s["total"])}</td>'
+                       f'<td class="r">{s["roundedPerNode"]}</td><td></td></tr>')
+        tt = c["ccu"][b]
+        return (f'<div class="tbl" data-base="{b}"{hidden[b]}><table><thead><tr><th>Host</th><th class="r">Cores</th>'
+                '<th class="r">Memória</th><th class="r">Cores ÷ 6</th><th class="r">Memória ÷ 12</th><th class="r">CCU</th>'
+                '<th class="r">Arredondada</th><th class="r">CPU pico · memória usada</th></tr></thead>'
+                f'<tbody>{"".join(out)}</tbody><tfoot><tr><td>Total</td><td class="r">{t["cores"]}</td><td></td>'
+                f'<td class="r">{br(tt["cores"])}</td><td class="r">{br(tt["memory"])}</td><td class="r">{br(tt["total"])}</td>'
+                f'<td class="r">{tt["roundedPerNode"]}</td><td></td></tr></tfoot></table></div>')
+
+    cards = []
+    for cl in clusters:
+        r, d = cl["report"], cl["dataUnderManagement"]
+        color = PRODUCTS[cl["product"]]["color"]
+        if cl["product"] == "base":
+            body = (f'<dt>Dados lógicos</dt><dd class="big">{tb(d["tb"])} TB</dd><dt>Com réplicas</dt><dd>{tb(d["rawTB"])} TB</dd>'
+                    f'<dt>Capacidade do HDFS</dt><dd>{br(r["capacityUnderManagement"]["hdfsTB"])} TB</dd>')
+            nc = r["dataUnderManagement"]["notCounted"]
+            note = ("HDFS ÷ replicação + Kudu ÷ 3." + (f" Não entraram: {', '.join(s.title() for s in nc)}, porque o Cloudera "
+                    "Manager não expõe o espaço usado deles de forma comparável." if nc else ""))
+        elif cl["product"] == "streaming":
+            body = (f'<dt>Ocupado nos volumes</dt><dd class="big">{_gb(d["tb"] * TIB)}</dd><dt>Em TB</dt><dd>≤ {tb(d["tb"])} TB</dd>'
+                    f'<dt>Volumes de dados</dt><dd>{br(r["capacityUnderManagement"]["allDataVolumesTB"], 1)} TB</dd>')
+            note = "É um teto: soma logs do Kafka (com réplicas) e repositórios do NiFi. O CM não mede o tamanho por tópico."
+        else:
+            body = (f'<dt>Data Under Management</dt><dd class="big">não se aplica</dd>'
+                    f'<dt>CCU (RAM do SO)</dt><dd>{br(r["ccu"]["os"]["total"])}</dd>'
+                    f'<dt>Volumes locais</dt><dd>{br(r["capacityUnderManagement"]["allDataVolumesTB"], 1)} TB</dd>')
+            note = "Cobrado só por compute. Usa o storage e o SDX do Base, então os dados que lê já estão na conta do Base."
+        tag = cl["name"] if cl["name"] == cl["label"] else f'{cl["label"]} · {cl["name"]}'
+        cards.append(f'<div class="card" style="--c:{color}"><span class="tag">{_e(tag)}</span>'
+                     f'<h3>{_e(PRODUCTS[cl["product"]]["name"])}</h3><dl>{body}</dl>'
+                     f'<p class="muted" style="font-size:13px">{_e(note)}</p></div>')
+
+    dum = c["dataUnderManagementTB"]
+    dum_tile = (f"{tb(dum['base'])} TB" if "base" in dum else "—")
+    dum_sub = "Base, lógico" + (f"; Streaming ≤ {tb(dum['streaming'])} TB" if "streaming" in dum else "")
+    split = " · ".join(f"{sum(1 for x in clusters if x['product'] == p for _ in x['report']['hosts'])} {PRODUCTS[p]['label']}"
+                       for p in PRODUCTS if any(x["product"] == p for x in clusters))
+    findings = "".join(f'<li class="{_e(f["level"])}"><b>{_e(f["title"])}</b><span>{_e(f["text"])}</span></li>'
+                       for f in c["findings"])
+    questions = "".join(f'<li><b>{_e(q["topic"])}:</b> {_e(q["text"])}</li>' for q in c["questions"])
+    warn_html = "".join(f"<span>Aviso na coleta: {_e(w)}</span>" for w in c["warnings"])
+    chips = [f"Cloudera Manager {c['cmVersion']}" if c["cmVersion"] else None, f"{t['clusters']} clusters",
+             f"{t['nodes']} hosts", c["os"], f"Uso medido: últimos {br(days, 0)} dias"]
+    name = c["displayName"]
+
+    return f"""<!doctype html>
+<html lang="pt-BR">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>{_e(name)} Licenciamento Consolidado</title>
+{FONTS}
+<style>{CSS}{CONSOLIDATED_CSS}</style>
+</head>
+<body>
+<div class="wrap">
+  <header>
+    <span class="eyebrow">Licenciamento Cloudera · {date}</span>
+    <h1>{_e(name)}: licenciamento de {t['clusters']} cluster{'s' if t['clusters'] != 1 else ''}</h1>
+    <p class="muted">Todos os clusters gerenciados pelo mesmo Cloudera Manager, cada um com a métrica do seu produto. A CCU é calculada sobre o recurso disponível em cada host, não sobre o consumo.</p>
+    <div class="meta">{''.join(f'<span class="chip">{_e(x)}</span>' for x in chips if x)}</div>
+  </header>
+
+  <section aria-labelledby="s-resumo">
+    <div class="sec-head"><span class="eyebrow">Resumo</span><h2 id="s-resumo">O total do ambiente</h2></div>
+    <div class="tiles">
+      {_tile("CCU total", br(c['ccu']['os']['total']), "RAM vista pelo SO", True, "os")}
+      {_tile("CCU total", br(c['ccu']['nominal']['total']), "RAM nominal", True, "nominal")}
+      {_tile("CCU arredondada", str(c['ccu']['os']['roundedPerNode']), "cada Node para cima", True)}
+      {_tile("Data Under Mgmt", dum_tile, dum_sub, True)}
+      {_tile("Nodes", str(t['nodes']), split)}
+      {_tile("Cores", str(t['cores']), "com hyperthreading" if t['logicalCores'] > t['physicalCores'] > 0 else "sem hyperthreading")}
+      {_tile("Memória", f"{br(t['memoryOsGB'], 0)} GB", "vista pelo SO")}
+    </div>
+    <div class="toggle" role="group" aria-label="Base de memória do cálculo">
+      <button type="button" data-show="os" aria-pressed="true">RAM vista pelo SO</button>
+      <button type="button" data-show="nominal" aria-pressed="false">RAM nominal</button>
+    </div>
+    {stack('os')}{stack('nominal')}
+  </section>
+
+  <section aria-labelledby="s-prod">
+    <div class="sec-head"><span class="eyebrow">Produtos</span><h2 id="s-prod">Como cada cluster é cobrado</h2>
+      <p class="muted">Desde fevereiro de 2025, Base e Streaming on-premises são cobrados por compute e Data Under Management; o Data Services, só por compute. A fórmula da CCU é a mesma: cores ÷ 6 + memória em GB ÷ 12 (1 GB = 1.024 MB). O produto de cada cluster é inferido pelo tipo e pelos serviços.</p></div>
+    <div class="tbl"><table>
+      <thead><tr><th>Cluster</th><th>Produto</th><th>Métrica</th><th class="r">Nodes</th><th class="r">Cores</th><th class="r">RAM</th><th class="r">CPU pico</th><th class="r">Memória usada</th><th class="r">CCU</th><th class="r">Arred.</th><th class="r">Data Under Mgmt</th></tr></thead>
+      <tbody>{''.join(rows)}</tbody>
+      <tfoot><tr><td>Total</td><td></td><td></td><td class="r">{t['nodes']}</td><td class="r">{t['cores']}</td><td class="r">{br(t['memoryOsGB'], 0)} GB</td><td></td><td></td>
+        <td class="r" data-base="os">{br(c['ccu']['os']['total'])}</td><td class="r" data-base="nominal" hidden>{br(c['ccu']['nominal']['total'])}</td><td class="r">{c['ccu']['os']['roundedPerNode']}</td><td></td></tr></tfoot>
+    </table></div>
+  </section>
+
+  <section aria-labelledby="s-hosts">
+    <div class="sec-head"><span class="eyebrow">Detalhe</span><h2 id="s-hosts">CCU por host</h2>
+      <p class="muted">A última coluna mostra o pico de CPU e a faixa de memória usada nos últimos {br(days, 0)} dias, para comparar o que é cobrado com o que é usado.</p></div>
+    {host_table('os')}{host_table('nominal')}
+  </section>
+
+  <section aria-labelledby="s-dum">
+    <div class="sec-head"><span class="eyebrow">Dados</span><h2 id="s-dum">Data Under Management</h2>
+      <p class="muted">Total de dados que os produtos estão configurados para acessar, em TB de 1.024 GB.</p></div>
+    <div class="metric">{''.join(cards)}</div>
+  </section>
+
+  <section aria-labelledby="s-find">
+    <div class="sec-head"><span class="eyebrow">Achados</span><h2 id="s-find">O que chama atenção</h2></div>
+    <ul class="findings">{findings}</ul>
+  </section>
+
+  <section aria-labelledby="s-q">
+    <div class="sec-head"><span class="eyebrow">Para confirmar</span><h2 id="s-q">Pontos a validar no Order Form</h2></div>
+    <ol class="qs">{questions}</ol>
+  </section>
+
+  <footer>
+    <span>Fontes: API do Cloudera Manager (hosts, roles, séries temporais de CPU, memória, filesystems, HDFS e Kudu), a página <a href="{METRICS_URL}" target="_blank" rel="noopener">Cloudera Licensed Metrics</a> e a <a href="{PRICING_UPDATE_URL}" target="_blank" rel="noopener">atualização de preços de fevereiro de 2025</a>.</span>
+    <span>Levantamento gerado em {date} pelo cm-mcp-server. Os valores de uso são médias horárias dos últimos {br(days, 0)} dias.</span>
+    {warn_html}
+  </footer>
+</div>
+<script>{JS}</script>
+</body>
+</html>
+"""
+
+
+# ---------------------------------------------------------------------------
+# Gravação e tool
+# ---------------------------------------------------------------------------
+
 def write_report(r: dict, fmt: str, output_dir: str | None = None) -> dict[str, str]:
-    """Grava o HTML (e o PDF, se pedido) e devolve os caminhos."""
+    """Grava o HTML (e o PDF, se pedido) e devolve os caminhos. Aceita o relatório de um cluster ou o consolidado."""
     out = Path(output_dir or os.environ.get("CM_REPORT_DIR") or Path.home() / "cm-reports").expanduser()
     out.mkdir(parents=True, exist_ok=True)
     stem = f"licenciamento-{_slug(r['cluster'])}-{r['generatedAt'][:10].replace('-', '')}"
     html_path = out / f"{stem}.html"
-    html_path.write_text(render_html(r), encoding="utf-8")
+    page = render_consolidated_html(r) if r.get("kind") == "consolidated" else render_html(r)
+    html_path.write_text(page, encoding="utf-8")
     paths = {"html": str(html_path)}
     if fmt == "pdf":
         pdf_path = out / f"{stem}.pdf"
@@ -888,6 +1250,19 @@ def write_report(r: dict, fmt: str, output_dir: str | None = None) -> dict[str, 
 
 
 def _summary(r: dict) -> dict:
+    if r.get("kind") == "consolidated":
+        return {
+            "clusters": [{"name": c["name"], "product": c["label"], "metric": c["metric"],
+                          "nodes": c["report"]["totals"]["nodes"], "ccuOs": c["report"]["ccu"]["os"]["total"],
+                          "ccuNominal": c["report"]["ccu"]["nominal"]["total"],
+                          "roundedPerNode": c["report"]["ccu"]["os"]["roundedPerNode"],
+                          "dataUnderManagementTB": (c["dataUnderManagement"] or {}).get("tb")} for c in r["clusters"]],
+            "totals": {**r["totals"], "ccuOs": r["ccu"]["os"]["total"], "ccuNominal": r["ccu"]["nominal"]["total"],
+                       "roundedPerNode": r["ccu"]["os"]["roundedPerNode"]},
+            "dataUnderManagementTB": r["dataUnderManagementTB"],
+            "findings": [f["title"] for f in r["findings"]],
+            "unassignedHosts": len(r["unassignedHosts"]), "warnings": r["warnings"],
+        }
     return {
         "cluster": r["cluster"], "nodes": r["totals"]["nodes"], "cores": r["totals"]["cores"],
         "memoryOsGB": r["totals"]["memoryOsGB"], "memoryNominalGB": r["totals"]["memoryNominalGB"],
@@ -903,22 +1278,31 @@ def _summary(r: dict) -> dict:
     }
 
 
+def _compact_consolidated(r: dict) -> dict:
+    """JSON do consolidado sem repetir, em cada cluster, a lista de hosts de fora dele."""
+    clusters = [{**c, "report": {k: v for k, v in c["report"].items() if k not in ("otherHosts", "questions")}}
+                for c in r["clusters"]]
+    return {**r, "clusters": clusters}
+
+
 @mcp.tool()
-def license_report(cluster: str, output: str = "json", days: float = 7, output_dir: str | None = None,
+def license_report(cluster: str | None = None, output: str = "json", days: float = 7, output_dir: str | None = None,
                    data_mount_regex: str = DEFAULT_DATA_MOUNTS, nominal_memory_step_gb: int = 8) -> str:
     """
-    Levantamento de capacidade e licenciamento Cloudera de um cluster: cores, memória, uso
-    (pico de CPU e faixa de memória nos últimos `days` dias), discos de dados por host e as
-    métricas da página Cloudera Licensed Metrics:
+    Levantamento de capacidade e licenciamento Cloudera: cores, memória, uso (pico de CPU e
+    faixa de memória nos últimos `days` dias), discos de dados por host e as métricas da página
+    Cloudera Licensed Metrics:
       - CCU por Node = cores ÷ 6 + memória GB ÷ 12, sobre o recurso disponível, em duas bases:
         RAM vista pelo SO e RAM nominal (arredondada para cima em múltiplos de
         `nominal_memory_step_gb`); traz também o total arredondando cada Node para cima;
       - Data Under Management (TB lógicos = HDFS usado ÷ replicação + Kudu ÷ 3; e brutos);
       - Capacity Under Management (capacidade do HDFS e soma de todos os volumes de dados,
         identificados por `data_mount_regex`).
-    Inclui achados (HDFS cheio, /var cheio, volumes desbalanceados, hosts ociosos, discos
-    vazios fora dos DataNodes) e pontos a validar no Order Form, além dos hosts do mesmo CM
-    que estão fora do cluster. TB = 1.024 GB.
+    cluster: nome de um cluster, ou vazio para o CONSOLIDADO de todos os clusters do CM (base,
+    compute e experience). No consolidado cada cluster recebe a métrica do seu produto
+    (modelo on-premises desde fev/2025): Base e Streaming (NiFi/CFM, Kafka) = CCU + Data Under
+    Management; Data Services (ECS) = só CCU. O produto é inferido pelo tipo e pelos serviços.
+    Inclui achados e pontos a validar no Order Form. TB = 1.024 GB.
     output: "json" (relatório completo), "html" (grava a página e devolve o caminho e um
     resumo) ou "pdf" (grava HTML e PDF; usa Edge/Chrome headless, ou CM_PDF_BROWSER).
     output_dir: pasta dos arquivos (padrão CM_REPORT_DIR ou ~/cm-reports).
@@ -926,7 +1310,10 @@ def license_report(cluster: str, output: str = "json", days: float = 7, output_d
     fmt = output.lower()
     if fmt not in ("json", "html", "pdf"):
         return "output deve ser json, html ou pdf."
-    r = build_license_report(cluster, days, data_mount_regex, nominal_memory_step_gb)
+    if cluster:
+        r = build_license_report(cluster, days, data_mount_regex, nominal_memory_step_gb)
+    else:
+        r = build_consolidated_report(days, data_mount_regex, nominal_memory_step_gb)
     if fmt == "json":
-        return _out(r)
+        return _out(_compact_consolidated(r) if r.get("kind") == "consolidated" else r)
     return _out({"files": write_report(r, fmt, output_dir), "summary": _summary(r)})
