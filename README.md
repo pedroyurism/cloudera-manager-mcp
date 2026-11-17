@@ -4,7 +4,7 @@ Servidor MCP em Python (FastMCP + httpx) que expõe a API REST do Cloudera Manag
 para o Claude (Desktop, Claude Code ou qualquer cliente MCP). **Só faz GET**: não há
 nenhuma tool de start/stop/restart/alteração de configuração.
 
-## Tools (31)
+## Tools (34)
 
 ### Relatório de saúde (1)
 
@@ -28,6 +28,26 @@ em manutenção) não muda o status. Se uma parte da API negar acesso (403), ela
 | Alertas | — | alertas CRITICAL na janela (`hours`) |
 | Restart pendente | — | configuração desatualizada em serviço/role, client config desatualizado |
 | Comandos | — | comando rodando há mais de `stuck_command_minutes` (60 min), com a etapa em que está parado |
+
+### Licenciamento Cloudera (1)
+
+| Tool | O que faz |
+|---|---|
+| `license_report` | **Levantamento de capacidade e licenciamento** de um cluster pela página [Cloudera Licensed Metrics](https://www.cloudera.com/legal/commercial-terms-and-conditions/cloudera-licensed-metrics.html): cores, memória, uso dos últimos `days` dias (pico de CPU, faixa de memória, swap) e discos de dados por host; **CCU** por Node (`cores ÷ 6 + GB ÷ 12`) em duas bases de memória (RAM vista pelo SO e RAM nominal) e com arredondamento por Node; **Data Under Management** (HDFS usado ÷ replicação + Kudu ÷ 3, e o valor bruto) e **Capacity Under Management** (capacidade do HDFS e soma de todos os volumes de dados). Gera achados (HDFS ou `/var` cheios, volumes desbalanceados, hosts ociosos, discos vazios fora dos DataNodes), pontos a validar no Order Form e lista os hosts do mesmo CM fora do cluster. `output="json"`, `"html"` ou `"pdf"` |
+
+Regras do cálculo: 1 GB = 1.024 MB e 1 TB = 1.024 GB; vale o maior número entre cores
+lógicos e físicos; a RAM nominal é a do SO arredondada para cima em múltiplos de
+`nominal_memory_step_gb` (8 GB); volumes de dados são os pontos de montagem que casam com
+`data_mount_regex` (padrão `^/(data|dfs|grid|disk|hadoop)...`). Ozone, Kafka e Solr não entram
+na Data Under Management (o CM não expõe o espaço usado de forma comparável), mas os discos
+deles já entram na Capacity Under Management.
+
+Com `output="html"` ou `"pdf"` a página é gravada em `output_dir` (padrão `CM_REPORT_DIR` ou
+`~/cm-reports`) como `licenciamento-<cluster>-<AAAAMMDD>.html`, e a tool devolve os caminhos e
+um resumo. O PDF (A4 paisagem) é impresso pelo **Edge ou Chrome em modo headless**, sem
+dependência nova; se nenhum for encontrado, defina `CM_PDF_BROWSER` com o caminho do
+executável. Também roda no terminal com
+[`cm-license-report`](#licenciamento-no-terminal-cm-license-report).
 
 ### Cloudera Manager (19)
 
@@ -189,6 +209,15 @@ cm-health-report --stuck-minutes 30               # comando travado a partir de 
 
 Código de saída: `0` OK, `1` ATENCAO, `2` CRITICO e `3` erro de conexão ou configuração.
 
+## Licenciamento no terminal (cm-license-report)
+
+```bash
+cm-license-report --cluster SPtrans                       # grava o HTML em ~/cm-reports
+cm-license-report --cluster SPtrans --format pdf          # HTML + PDF
+cm-license-report --cluster SPtrans --format json > lic.json
+cm-license-report --cluster SPtrans --out relatorios --days 30 --env-file .env
+```
+
 ## Modo HTTP (opcional)
 
 ```bash
@@ -226,7 +255,7 @@ ssh -N -L 8088:master1:8088 usuario@bastion
 # e no MCP: YARN_RM_URL=http://127.0.0.1:8088  YARN_RM_TLS=false
 ```
 
-Se o RM não estiver acessível, as outras 28 tools continuam funcionando normalmente.
+Se o RM não estiver acessível, as outras 31 tools continuam funcionando normalmente.
 
 ## Variáveis de ambiente
 
@@ -246,6 +275,8 @@ Se o RM não estiver acessível, as outras 28 tools continuam funcionando normal
 | `YARN_RM_AUTH` | `none` | `none`, `basic` (Knox) ou `kerberos` |
 | `YARN_RM_USERNAME` / `YARN_RM_PASSWORD` | — | Só para `YARN_RM_AUTH=basic` |
 | `YARN_RM_VERIFY_SSL` | igual a `CM_VERIFY_SSL` | `true`, `false` ou caminho do CA bundle |
+| `CM_REPORT_DIR` | `~/cm-reports` | Pasta dos relatórios HTML/PDF do `license_report` |
+| `CM_PDF_BROWSER` | autodetectar | Caminho do Edge/Chrome/Chromium usado para gerar o PDF |
 
 ## Exemplos de perguntas
 
@@ -264,6 +295,12 @@ Se o RM não estiver acessível, as outras 28 tools continuam funcionando normal
 - "Quais alertas tivemos nas últimas 48 horas, por serviço?"
 - "Algum serviço está esperando restart por configuração alterada?"
 - "Tem algum comando travado no CM? Em que etapa ele parou?"
+
+**Licenciamento**
+
+- "Quantas CCU o cluster SPtrans consome pela RAM do SO e pela RAM nominal?"
+- "Gera o levantamento de licenciamento do LAB em PDF para eu mandar para o time."
+- "Qual a Data Under Management e a Capacity Under Management do cluster?"
 
 **YARN**
 
