@@ -448,8 +448,8 @@ def cm_api_get(path: str, params_json: str = "{}") -> str:
     return _out(cm().get(path, params))
 
 
-# Registra as tools de saúde, comandos, YARN e Impala (módulos separados)
-from cm_mcp_server import commands, health, impala, yarn  # noqa: E402,F401
+# Registra as tools de saúde, comandos, YARN, Impala e licenciamento (módulos separados)
+from cm_mcp_server import commands, health, impala, licensing, yarn  # noqa: E402,F401
 
 
 # ---------------------------------------------------------------------------

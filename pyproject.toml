@@ -1,6 +1,6 @@
 [project]
 name = "cm-mcp-server"
-version = "0.5.0"
+version = "0.6.0"
 description = "MCP server somente leitura para a API REST do Cloudera Manager"
 readme = "README.md"
 requires-python = ">=3.10"
@@ -19,6 +19,7 @@ dev = ["pytest>=8"]
 cm-mcp-stdio = "cm_mcp_server.server:main_stdio"
 cm-mcp-http = "cm_mcp_server.server:main_http"
 cm-health-report = "cm_mcp_server.cli:main"
+cm-license-report = "cm_mcp_server.cli:license_main"
 
 [build-system]
 requires = ["hatchling"]

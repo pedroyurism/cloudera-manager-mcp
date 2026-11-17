@@ -63,5 +63,51 @@ def main(argv: list[str] | None = None) -> int:
     return EXIT_CODES[report["overallStatus"]]
 
 
+def license_main(argv: list[str] | None = None) -> int:
+    """
+    cm-license-report --cluster SPtrans                 # grava HTML em ~/cm-reports
+    cm-license-report --cluster SPtrans --format pdf    # HTML + PDF (Edge/Chrome headless)
+    cm-license-report --cluster SPtrans --format json   # JSON completo no stdout
+    """
+    ap = argparse.ArgumentParser(prog="cm-license-report",
+                                 description="Levantamento de capacidade e licenciamento Cloudera (CCU, DUM, CUM).")
+    ap.add_argument("--cluster", required=True, help="nome interno do cluster")
+    ap.add_argument("--format", choices=("html", "pdf", "json"), default="html")
+    ap.add_argument("--days", type=float, default=7, help="janela de uso em dias (padrão 7)")
+    ap.add_argument("--out", help="pasta de saída (padrão CM_REPORT_DIR ou ~/cm-reports)")
+    ap.add_argument("--data-mounts", help="regex dos pontos de montagem de dados")
+    ap.add_argument("--nominal-step", type=int, default=8, help="múltiplo em GB da RAM nominal (padrão 8)")
+    ap.add_argument("--env-file", help="arquivo .env com as variáveis CM_*")
+    args = ap.parse_args(argv)
+
+    if args.env_file:
+        _load_env_file(args.env_file)
+    if hasattr(sys.stdout, "reconfigure"):
+        sys.stdout.reconfigure(encoding="utf-8")
+
+    from cm_mcp_server.licensing import DEFAULT_DATA_MOUNTS, build_license_report, write_report
+
+    try:
+        report = build_license_report(args.cluster, args.days, args.data_mounts or DEFAULT_DATA_MOUNTS,
+                                      args.nominal_step)
+    except Exception as e:  # noqa: BLE001
+        print(f"Erro ao consultar o Cloudera Manager: {e}", file=sys.stderr)
+        return 3
+    if args.format == "json":
+        print(json.dumps(report, ensure_ascii=False, indent=2))
+        return 0
+    try:
+        paths = write_report(report, args.format, args.out)
+    except Exception as e:  # noqa: BLE001
+        print(f"Erro ao gravar o relatório: {e}", file=sys.stderr)
+        return 4
+    o = report["ccu"]["os"]
+    print(f"{report['cluster']}: {report['totals']['nodes']} nodes, {o['total']} CCU (RAM do SO), "
+          f"{report['ccu']['nominal']['total']} CCU (RAM nominal)")
+    for kind, path in paths.items():
+        print(f"{kind.upper()}: {path}")
+    return 0
+
+
 if __name__ == "__main__":
     sys.exit(main())
