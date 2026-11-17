@@ -212,10 +212,10 @@ Código de saída: `0` OK, `1` ATENCAO, `2` CRITICO e `3` erro de conexão ou co
 ## Licenciamento no terminal (cm-license-report)
 
 ```bash
-cm-license-report --cluster SPtrans                       # grava o HTML em ~/cm-reports
-cm-license-report --cluster SPtrans --format pdf          # HTML + PDF
-cm-license-report --cluster SPtrans --format json > lic.json
-cm-license-report --cluster SPtrans --out relatorios --days 30 --env-file .env
+cm-license-report --cluster CLUSTER-LAB                       # grava o HTML em ~/cm-reports
+cm-license-report --cluster CLUSTER-LAB --format pdf          # HTML + PDF
+cm-license-report --cluster CLUSTER-LAB --format json > lic.json
+cm-license-report --cluster CLUSTER-LAB --out relatorios --days 30 --env-file .env
 ```
 
 ## Modo HTTP (opcional)
@@ -298,7 +298,7 @@ Se o RM não estiver acessível, as outras 31 tools continuam funcionando normal
 
 **Licenciamento**
 
-- "Quantas CCU o cluster SPtrans consome pela RAM do SO e pela RAM nominal?"
+- "Quantas CCU o cluster CLUSTER-LAB consome pela RAM do SO e pela RAM nominal?"
 - "Gera o levantamento de licenciamento do LAB em PDF para eu mandar para o time."
 - "Qual a Data Under Management e a Capacity Under Management do cluster?"
 
